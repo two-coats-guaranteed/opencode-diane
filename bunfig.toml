@@ -1,0 +1,16 @@
+# Bun configuration.
+#
+# The [test] block only affects `bun test` invocations (the coverage
+# scripts). The main `test` script runs each suite directly as a Bun
+# script — `bun tests/<name>.test.ts` — because the suites use their
+# own assertion harness rather than `bun:test` primitives, so they
+# self-gate via process exit codes.
+
+[test]
+coverage = true
+coverageReporter = ["text", "lcov"]
+coverageDir = "coverage"
+# src/types.ts is pure type declarations — no runtime code to cover,
+# so excluding it keeps the coverage number meaningful (this mirrors
+# what the old .c8rc.json did).
+coveragePathIgnorePatterns = ["src/types.ts"]

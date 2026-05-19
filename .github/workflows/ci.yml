@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  # ─── Typecheck + lint + build + test + smoke + size guard ──────────
+  # OpenCode loads plugins under the Bun runtime, so the whole
+  # toolchain runs on Bun. There is no Node version matrix: the
+  # relevant axis is the Bun version, and the plugin targets current
+  # Bun (what OpenCode ships).
+  test:
+    name: test (bun)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Type-check
+        run: bun run typecheck
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Build
+        run: bun run build
+
+      - name: Run tests
+        run: bun run test
+
+      - name: Smoke-test the built dist/
+        # The unit suites run against src/; this exercises the compiled
+        # dist/index.js the way OpenCode's loader would, so a build-
+        # output regression can't slip through green tests.
+        run: bun run smoke
+
+      - name: Package size guard
+        # Fails if the published package would exceed the size ceiling
+        # or drop a vendored grammar — the tripwire against silently
+        # ballooning the install with another large grammar.
+        run: bun run check:size
+
+  # ─── Coverage: runs once, enforces the floor, publishes the report ─
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    # Run after the test job so we don't burn minutes computing
+    # coverage for a build that's already known to be broken.
+    needs: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build
+        run: bun run build
+
+      - name: Run tests with coverage + threshold gate
+        # coverage:check runs `bun test --coverage` and fails the job
+        # if line/function coverage falls below the floor. The lcov
+        # report is emitted into ./coverage (see bunfig.toml).
+        run: bun run coverage:check
+
+      - name: Upload lcov report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 14
+          if-no-files-found: warn

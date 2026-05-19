@@ -1,0 +1,59 @@
+{
+  "name": "opencode-diane",
+  "version": "1.0.0",
+  "description": "OpenCode plugin: hierarchical, token-efficient memory for any git repository. Convention-free — pre-fills from git diff-structure and project files, no embeddings, no LLM, no commit-message parsing. Includes skill mining.",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "memory",
+    "experience-reuse",
+    "token-saving",
+    "bm25",
+    "language-agnostic",
+    "agents.md"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "grammars",
+    "README.md",
+    "WIKI.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint src tests",
+    "clean": "rm -rf dist coverage",
+    "prepublishOnly": "bun run clean && bun run build",
+    "test": "bun tests/store.test.ts && bun tests/search.test.ts && bun tests/ingest.test.ts && bun tests/mining.test.ts && bun tests/sessions.test.ts && bun tests/code-health.test.ts && bun tests/code-map.test.ts && bun tests/session-snapshot.test.ts && bun tests/adaptive.test.ts && bun tests/file-log.test.ts && bun tests/token-savings.test.ts && bun tests/skill-activation.test.ts && bun tests/scaling.test.ts && bun tests/plugin.test.ts",
+    "smoke": "bun scripts/smoke.mjs",
+    "check:size": "bun scripts/check-size.mjs",
+    "test:coverage": "bun test --coverage",
+    "coverage:check": "bun scripts/coverage-check.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": ">=1.14.0",
+    "web-tree-sitter": "0.25.10"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "@types/bun": "^1.1.14",
+    "@types/node": "^22.10.0",
+    "eslint": "^9.39.4",
+    "typescript": "^5.6.3",
+    "typescript-eslint": "^8.59.3"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  }
+}

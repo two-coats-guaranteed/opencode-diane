@@ -1,0 +1,18 @@
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+
+# SQLite store written by the plugin when run on its own repo
+# (and the WAL/SHM sidecars SQLite manages alongside it)
+*.db
+*.db-wal
+*.db-shm
+*.db.migrated
+
+# Scratch stores created by the comparison/measurement scripts
+.measure-tmp-store/
+.dump-code-map-tmp/
+.aider*
+.idea

@@ -1,0 +1,10 @@
+src/
+tests/
+.github/
+coverage/
+.nyc_output/
+tsconfig.json
+.c8rc.json
+.gitignore
+node_modules/
+*.log

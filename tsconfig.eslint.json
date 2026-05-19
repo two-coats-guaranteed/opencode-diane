@@ -1,0 +1,13 @@
+// Lint-only TS project: same compiler settings as tsconfig.json, but
+// also includes tests/ so typescript-eslint's type-aware rules
+// (no-floating-promises, await-thenable) can see the test files.
+// Never used for emit — `bun run build` still uses tsconfig.json.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts", "eslint.config.js"],
+  "exclude": ["dist", "node_modules", "coverage"]
+}
