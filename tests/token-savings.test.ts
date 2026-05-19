@@ -101,7 +101,7 @@ async function buildFixture(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "diane-mem-savings-"))
   await mkdir(join(root, "src"), { recursive: true })
 
-  git(root, ["init", "--initial-branch=main", "-q"])
+  git(root, ["init", "-q"])
   git(root, ["config", "user.email", "fixture@test"])
   git(root, ["config", "user.name", "Fixture"])
 

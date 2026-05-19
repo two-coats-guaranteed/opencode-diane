@@ -10,6 +10,7 @@
 
 import type { Category, Memory, RecallHit } from "../types.js"
 import { InvertedIndex } from "./inverted-index.js"
+import { personalizedPageRank } from "./ppr.js"
 import { tokenize } from "./tokenize.js"
 
 const K1 = 1.2
@@ -39,6 +40,26 @@ export interface SearchOptions {
   subject?: string
   /** Cap on returned hits (count). Default 10. */
   limit?: number
+  /**
+   * Optional pre-computed embedding of `query`. Supplied only when
+   * semantic search is enabled — the async embedding is done by the
+   * caller so the recall path itself stays synchronous. When present,
+   * `recallDetailed` fuses vector similarity with the BM25 ranking;
+   * when absent, retrieval is the pure lexical path. `search()` itself
+   * ignores this field — fusion happens one level up, in the
+   * repository.
+   */
+  queryVector?: Float32Array
+  /**
+   * Use Personalized PageRank for the co-change boost instead of the
+   * default single-hop propagation. Default off (undefined / false).
+   *
+   * When on, the co-change graph contribution is computed as a
+   * random-walk-with-restart personalized on the query's textual hits
+   * — relevance spreads multi-hop and is graded by graph distance.
+   * When off, retrieval uses the cheaper one-hop boost. See ppr.ts.
+   */
+  personalizedPageRank?: boolean
   /**
    * Optional ceiling on the *formatted* size of the result, in
    * estimated tokens. When set, ranked hits are packed until the next
@@ -172,47 +193,33 @@ export function search(
     if (score > 0) scoreById.set(id, score)
   }
 
-  // 3b) Co-change graph boost — the Aider PageRank idea, one hop.
+  // 3b) Co-change graph boost — the Aider PageRank idea.
   //     A well-scoring memory about file X *pulls in* memories about
-  //     the files X is historically modified together with, even when
-  //     those files don't textually match the query. This is the
-  //     whole point: surface structurally-related context the query
-  //     alone would miss (query hits `maker.py` → `detector.py`
-  //     history surfaces too, because git shows them coupled).
+  //     files X is historically modified together with, even when
+  //     those files don't textually match the query — surfacing
+  //     structurally-related context the query alone would miss.
   //
-  //     Bounded and low-scored so it can't drown direct matches:
-  //       - only the top SEED_LIMIT textual hits act as seeds
-  //       - each neighbour file contributes ≤ PROPAGATE_PER_FILE
-  //         memories, picked by useCount (most-proven first)
-  //       - propagated score = seed score × COCHANGE_BOOST (0.25),
-  //         so a pulled-in hit always ranks below a real textual hit
+  //     Two strategies, selected by `opts.personalizedPageRank`:
+  //       - default (off): ONE HOP — boost the direct co-change
+  //         neighbours of the top textual hits. O(seeds × neighbours),
+  //         fully inspectable.
+  //       - on: PERSONALIZED PAGERANK — a restart-biased random walk
+  //         over the whole co-change graph, so relevance reaches
+  //         multi-hop files, graded by graph distance.
+  //
+  //     Either way it is bounded and low-scored so it can't drown
+  //     direct matches: only the top SEED_LIMIT textual hits seed it,
+  //     each file contributes ≤ PROPAGATE_PER_FILE memories (most-used
+  //     first), and a pulled-in hit always ranks below a real textual
+  //     match.
   if (scoreById.size > 0 && index.coChange.size > 0) {
     const seeds = Array.from(scoreById.entries())
       .sort((a, b) => b[1] - a[1])
       .slice(0, SEED_LIMIT)
-    for (const [seedId, seedScore] of seeds) {
-      const seedMem = byId.get(seedId)
-      if (!seedMem) continue
-      const seedFile = fileOfSubject(seedMem.subject)
-      if (!seedFile) continue
-      const neighbors = index.coChangeNeighbors(seedFile)
-      if (!neighbors) continue
-      for (const neighborFile of neighbors) {
-        const memIds = index.bySubject.get(neighborFile)
-        if (!memIds) continue
-        // Most-used memories about the neighbour file first.
-        const ranked = Array.from(memIds)
-          .map((id) => byId.get(id))
-          .filter((m): m is Memory => m !== undefined)
-          .sort((a, b) => b.useCount - a.useCount)
-          .slice(0, PROPAGATE_PER_FILE)
-        const propagated = seedScore * COCHANGE_BOOST
-        for (const m of ranked) {
-          const current = scoreById.get(m.id) ?? 0
-          // Never lower an existing (textual) score; only lift.
-          if (propagated > current) scoreById.set(m.id, propagated)
-        }
-      }
+    if (opts.personalizedPageRank) {
+      applyPprBoost(index, byId, scoreById, seeds)
+    } else {
+      applyOneHopBoost(index, byId, scoreById, seeds)
     }
   }
 
@@ -249,6 +256,94 @@ export function search(
  * checks tokens, not substrings, so `latest`, `contest`, `testimony`
  * are not mistaken for tests.
  */
+/**
+ * One-hop co-change boost (the default). Lifts memories about the
+ * direct co-change neighbours of the seed files: a neighbour memory's
+ * score is raised to `seedScore × COCHANGE_BOOST`, never above its own
+ * textual score, and at most `PROPAGATE_PER_FILE` memories per file.
+ */
+function applyOneHopBoost(
+  index: InvertedIndex,
+  byId: Map<string, Memory>,
+  scoreById: Map<string, number>,
+  seeds: Array<[string, number]>
+): void {
+  for (const [seedId, seedScore] of seeds) {
+    const seedMem = byId.get(seedId)
+    if (!seedMem) continue
+    const seedFile = fileOfSubject(seedMem.subject)
+    if (!seedFile) continue
+    const neighbors = index.coChangeNeighbors(seedFile)
+    if (!neighbors) continue
+    for (const neighborFile of neighbors) {
+      const memIds = index.bySubject.get(neighborFile)
+      if (!memIds) continue
+      // Most-used memories about the neighbour file first.
+      const ranked = Array.from(memIds)
+        .map((id) => byId.get(id))
+        .filter((m): m is Memory => m !== undefined)
+        .sort((a, b) => b.useCount - a.useCount)
+        .slice(0, PROPAGATE_PER_FILE)
+      const propagated = seedScore * COCHANGE_BOOST
+      for (const m of ranked) {
+        const current = scoreById.get(m.id) ?? 0
+        // Never lower an existing (textual) score; only lift.
+        if (propagated > current) scoreById.set(m.id, propagated)
+      }
+    }
+  }
+}
+
+/**
+ * Personalized PageRank co-change boost (opt-in). Runs a
+ * restart-biased random walk over the whole co-change graph, seeded on
+ * the textual hits, and lifts memories about every file the walk
+ * reaches — graded by the walk's stationary score, so a direct
+ * neighbour is lifted more than a two-hop file. Bounded: the boost is
+ * scaled so the most-central file receives at most
+ * `topSeedScore × COCHANGE_BOOST`, keeping any pulled-in hit below the
+ * strongest textual match.
+ */
+function applyPprBoost(
+  index: InvertedIndex,
+  byId: Map<string, Memory>,
+  scoreById: Map<string, number>,
+  seeds: Array<[string, number]>
+): void {
+  // Personalization vector: each seed's file, weighted by its BM25 score.
+  const personalization = new Map<string, number>()
+  for (const [id, score] of seeds) {
+    const file = fileOfSubject(byId.get(id)?.subject ?? "")
+    if (file) personalization.set(file, (personalization.get(file) ?? 0) + score)
+  }
+  if (personalization.size === 0) return
+
+  const ppr = personalizedPageRank(index.coChange, personalization)
+  let maxScore = 0
+  for (const v of ppr.values()) if (v > maxScore) maxScore = v
+  if (maxScore <= 0) return
+
+  // Scale so the most-central file gets at most topSeedScore × COCHANGE_BOOST.
+  const topSeedScore = seeds[0][1]
+  for (const [file, prob] of ppr) {
+    const boost = (prob / maxScore) * topSeedScore * COCHANGE_BOOST
+    if (boost <= 1e-9) continue
+    const memIds = index.bySubject.get(file)
+    if (!memIds) continue
+    const ranked = Array.from(memIds)
+      .map((id) => byId.get(id))
+      .filter((m): m is Memory => m !== undefined)
+      .sort((a, b) => b.useCount - a.useCount)
+      .slice(0, PROPAGATE_PER_FILE)
+    for (const m of ranked) {
+      // Additive: the stationary score already aggregates every path
+      // from every seed, so PPR lifts each file once, on top of any
+      // textual score that memory already has.
+      scoreById.set(m.id, (scoreById.get(m.id) ?? 0) + boost)
+    }
+  }
+}
+
 function subjectLooksLikeTest(subject: string): boolean {
   for (const tok of tokenize(subject)) {
     if (tok === "test" || tok === "tests") return true

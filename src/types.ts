@@ -62,7 +62,7 @@ export interface RecallHit {
 
 /** Plugin-level configuration (everything optional with defaults). */
 export interface UserConfig {
-  /** Max disk usage for memory store, in megabytes. Default 5. */
+  /** Max disk usage for memory store, in megabytes. Default 50. */
   maxMemoryDiskMB?: number
   /** Run ingest on plugin startup. Default true. */
   autoIngestOnStartup?: boolean
@@ -102,15 +102,55 @@ export interface UserConfig {
    * When on, prefill measures one cheap signal — commit count (or
    * file count when there's no git) — classifies the repo as small /
    * medium / large, and scales `gitHistoryDepth`, the code-map file
-   * cap, the disk budget (large repos only — it never shrinks below
-   * the 5 MB default), and the co-change cutoff accordingly. The
-   * chosen tier is logged every run.
+   * cap, and the co-change cutoff accordingly. (The disk budget is
+   * deliberately not tier-scaled — the 50 MB default is generous
+   * enough for every realistic repo.) The chosen tier is logged
+   * every run.
    *
    * Adaptation only fills knobs the user did NOT set explicitly — any
    * value you pass in config always wins. Set FALSE to pin every
    * setting to its fixed default regardless of repo size.
    */
   adaptive?: boolean
+  /**
+   * Opt-in cross-lingual semantic search. Default FALSE.
+   *
+   * When on, the plugin also embeds each memory with a small
+   * multilingual e5 model (via the optional `@huggingface/transformers`
+   * dependency, downloaded on demand) and fuses vector similarity with
+   * the BM25 lexical ranking. This lets a query in one language
+   * (e.g. Chinese, Russian) retrieve code and comments written in
+   * another (e.g. English) — something pure lexical search cannot do.
+   *
+   * It is fully additive: when off, no model is downloaded, no runtime
+   * is loaded, and retrieval is byte-for-byte the lexical path. When
+   * on but the optional dependency is absent, the plugin logs that and
+   * falls back to lexical search rather than failing.
+   */
+  enableSemanticSearch?: boolean
+  /**
+   * The embedding model id (a transformers.js-compatible model).
+   * Default "Xenova/multilingual-e5-small". Only consulted when
+   * `enableSemanticSearch` is true.
+   */
+  embeddingModel?: string
+  /**
+   * Use Personalized PageRank for the co-change boost in recall,
+   * instead of the default single-hop propagation. Default FALSE.
+   *
+   * The co-change graph (files historically changed together) feeds a
+   * boost that surfaces structurally-related context a query alone
+   * would miss. By default that boost is one hop — the direct
+   * neighbours of the textual hits. With this on, it is instead a
+   * restart-biased random walk over the whole graph: relevance
+   * reaches multi-hop files, graded by graph distance.
+   *
+   * The tradeoff: PPR is a per-recall iterative computation (a few ms
+   * on a large graph) and is less trivially inspectable than the one
+   * hop. It is opt-in for that reason; the default stays cheap and
+   * fully traceable. See WIKI: "How it compares".
+   */
+  personalizedPageRank?: boolean
 }
 
 export interface ResolvedConfig {
@@ -124,6 +164,9 @@ export interface ResolvedConfig {
   enableCodeMap: boolean
   enableNudgeHook: boolean
   adaptive: boolean
+  enableSemanticSearch: boolean
+  embeddingModel: string
+  personalizedPageRank: boolean
   /**
    * Names of the keys the user set explicitly in opencode.json.
    * Adaptive tuning consults this so it never overrides a value the

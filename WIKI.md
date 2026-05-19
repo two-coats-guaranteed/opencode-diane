@@ -6,8 +6,10 @@ A plugin for [OpenCode](https://opencode.ai) that gives the agent a
 hierarchical, BM25-ranked memory store for **any git repository, in any
 language**. It pre-fills itself from git history and project files,
 lets the agent ingest past OpenCode sessions, and mines its own
-contents into reusable `SKILL.md` files. No embeddings. No LLM
-round-trips. No convention assumptions.
+contents into reusable `SKILL.md` files. No embeddings, no LLM
+round-trips, no convention assumptions — by default. (Cross-lingual
+semantic search is available as an explicit opt-in; see *Semantic
+search*.)
 
 The name is a *Twin Peaks* reference. In the show, Agent Cooper
 dictated all his observations to an unseen assistant named Diane.
@@ -96,8 +98,10 @@ low-signal; the diff-shape tags, co-change and churn are unaffected.
 See [No conventions](#no-conventions--only-structure).
 
 **How is it different from other memory plugins / approaches?**
-It is deterministic: BM25 over a hand-built index — no embeddings, no
-model, no API spend, fully reproducible and inspectable. See [How it
+By default it is deterministic: BM25 over a hand-built index — no
+embeddings, no model, no API spend, fully reproducible and
+inspectable. (An opt-in semantic-search mode adds an embedding model
+for cross-lingual recall — off unless you enable it.) See [How it
 compares](#how-it-compares).
 
 **What token reduction can I actually expect?**
@@ -115,7 +119,7 @@ vendored grammar files. No GPU, no API key, no network. See
 [Performance](#performance) and [Code map](#code-map).
 
 **Is it production-ready?**
-417 assertions across fourteen suites, ~80 % line coverage, verified
+444 assertions across fifteen suites, ~90 % line coverage, verified
 against the documented plugin contract and dry-run against real repos
 in ten languages. The one honest gap: it has not yet been run
 end-to-end inside a live OpenCode *server* — see [Verifying it inside
@@ -196,10 +200,12 @@ is not a separate graph structure in the store.
 The plugin is one specific point in the design space. What it trades,
 against the common alternatives:
 
-**vs. an embedding / vector memory.** The deliberate difference is *no
-model*. Retrieval is BM25 over a hand-built inverted index —
-deterministic, reproducible, debuggable, with no embedding model to
-ship, no GPU, no API spend, no nondeterminism. The cost of that choice
+**vs. an embedding / vector memory.** The deliberate difference is
+that the *default* uses *no model*. Retrieval is BM25 over a
+hand-built inverted index — deterministic, reproducible, debuggable,
+no GPU, no API spend. (Semantic search bridges to the embedding world
+as an opt-in when you need cross-lingual recall — see *Semantic
+search* — but it is off by default.) The cost of that choice
 is real: BM25 matches *tokens*, so a query has to share words (or CJK
 bigrams) with the memory — it will not catch a pure paraphrase the way
 a vector search can. Three things blunt that: identifier-aware
@@ -231,6 +237,21 @@ tags are then fitted into the token budget by binary search.
 but when no files are in the chat the budget multiplies by
 `map_mul_no_files=8` — up to ~8 192 tokens — so an empty chat gets a
 much wider view of the whole repo.
+
+*Where diane lands.* diane's default co-change boost is deliberately
+one hop — direct neighbours only — which is cheaper and trivially
+inspectable, but narrower than aider's whole-graph PageRank. The
+`personalizedPageRank` option closes that gap: turned on, diane runs
+its own Personalized PageRank (a restart-biased random walk seeded on
+the query's textual hits) over the co-change graph, so relevance
+reaches multi-hop files graded by graph distance. It is off by
+default — the random walk is a per-recall iterative computation (a few
+ms on a large graph) and less trivially traceable than one hop, so the
+cheap, fully-inspectable path stays the default and PPR is there for
+those who want the wider reach. The graph differs from aider's in
+kind: aider's edges are *symbol references* (who calls whom), diane's
+are *co-change* (what changes together in Git history) — structural
+coupling rather than static call structure.
 
 *Output format: source lines, not stripped signatures.* aider's output
 (via `TreeContext` with "lines of interest") shows the actual source
@@ -278,7 +299,10 @@ analyzer and SQLite FTS5 use (see *Multilingual retrieval*). Inverted
 index, `k1=1.2 b=0.75`, plus a small log-of-useCount tiebreak. On top
 of textual scoring, a one-hop **co-change boost**: a hit about file X
 pulls in memories about files X is historically modified with —
-structurally-related context a pure text match would miss. Recall
+structurally-related context a pure text match would miss. (With
+`personalizedPageRank` on, that one hop becomes a full
+restart-biased random walk over the co-change graph, reaching
+multi-hop files — opt-in; see *How it compares*.) Recall
 output is **token-budgeted**: ranked hits are packed to a ceiling
 (default 1200) so a
 call's context cost is predictable; an oversized sole hit is
@@ -357,9 +381,10 @@ pinned `session-snapshot` memory. Each tags the previous session's as
 beyond the tags; a later or parallel session resumes from the latest.
 See *Session snapshots* below.
 
-**7. LFU disk budget.** Configurable byte cap (default 5 MB). After
-every mutation, evict ascending by `(useCount, usedAt)` until under.
-Pinned entries (including snapshots) are never evicted.
+**7. LFU disk budget.** Configurable byte cap (default 50 MB — see
+*Configuration* and the *heap* note under *Performance*). After every
+mutation, evict ascending by `(useCount, usedAt)` until under. Pinned
+entries (including snapshots) are never evicted.
 
 **8. Skill mining.** Clusters memories by `subject`. Clusters with
 ≥ 3 entries become `<root>/.opencode/skills/<slug>/SKILL.md`. Runs
@@ -445,7 +470,7 @@ ignored, defaults applied).
 
 ```ts
 interface UserConfig {
-  maxMemoryDiskMB?: number       // default 5
+  maxMemoryDiskMB?: number       // default 50
   autoIngestOnStartup?: boolean  // default true
   gitHistoryDepth?: number       // default 500
   forceActive?: boolean          // default false
@@ -455,39 +480,47 @@ interface UserConfig {
   enableCodeMap?: boolean        // default false — see Code map
   enableNudgeHook?: boolean      // default true  — see Compatibility
   adaptive?: boolean             // default true  — see Adaptive sizing
+  enableSemanticSearch?: boolean // default false — see Semantic search
+  embeddingModel?: string        // default "Xenova/multilingual-e5-small"
+  personalizedPageRank?: boolean // default false — see "How it compares"
 }
 ```
 
 ## Adaptive sizing
 
-The fixed defaults (gitHistoryDepth 500, a 4000-file code-map cap, a
-5 MB budget) are a sensible middle — wasteful on a 50-commit toy,
-thin on a 100k-commit monorepo. With `adaptive` on (the default),
-prefill closes that gap from **one measured signal**: `git rev-list
---count HEAD`, or a bounded file count when there's no git. That
-signal sorts the repo into one of three named tiers, and a lookup
-table picks the knobs:
+The fixed defaults (gitHistoryDepth 500, a 4000-file code-map cap) are
+a sensible middle — wasteful on a 50-commit toy, thin on a 100k-commit
+monorepo. With `adaptive` on (the default), prefill closes that gap
+from **one measured signal**: `git rev-list --count HEAD`, or a
+bounded file count when there's no git. That signal sorts the repo
+into one of three named tiers, and a lookup table picks the knobs:
 
 | knob | small | medium | large |
 |---|---|---|---|
 | `gitHistoryDepth` | 250 | 500 | 1500 |
 | code-map file cap | 1500 | 4000 | 10000 |
-| disk budget | 5 MB | 5 MB | 20 MB |
 | co-change pass | on | on | skipped above 5000 commits |
 
-Two deliberate choices. **The budget only ever grows** — a small repo
-keeps the full 5 MB default, it's never shrunk; adaptation raises the
-ceiling for large repos, never lowers it. And **co-change is the one
-pass that gets cut** on huge histories: its pair-counting is
-O(commits × files²), the only super-linear step in the plugin, so
-above the threshold it's skipped (commit/churn/recency still run).
+**The disk budget is deliberately not in that table.** It used to be
+(small/medium 5 MB, large 20 MB) — back when the default was a tight
+5 MB that genuinely needed widening for big repos. The default is now
+a generous 50 MB (see *Configuration*), which clears even a
+depth-capped large repo's store (~6–8 MB) several times over, so there
+is nothing left for adaptation to do: every tier carries the same
+50 MB budget. To use more or less, set `maxMemoryDiskMB` explicitly.
+
+**Co-change is the one pass that gets cut** on huge histories: its
+pair-counting is O(commits × files²), the only super-linear step in
+the plugin, so above the threshold it's skipped (commit/churn/recency
+still run).
 
 One input, three tiers, a table — not a pile of heuristics — so the
 behaviour stays inspectable: the chosen tier and every knob it moved
 are logged each run (`prefill: repo tier=large (9000 commits) — …`).
 Adaptation only fills knobs the user did **not** set explicitly; an
-explicit config value always wins, even one below the 5 MB floor.
-`adaptive: false` pins everything to the fixed defaults.
+explicit config value always wins, including `maxMemoryDiskMB` set
+below the 50 MB default. `adaptive: false` pins everything to the
+fixed defaults.
 
 When there's no git, the file count is the signal instead — same
 mechanism, different sensor — so adaptive sizing still works on a
@@ -596,16 +629,26 @@ roughly 17 KB of heap per memory, ~70× the on-disk size. At a
 realistic large store (~25k memories → ~440 MB) that's a chunky but
 manageable footprint on a modern dev machine.
 
-What keeps it bounded is the byte budget plus depth-capped ingesters.
-The default 5 MB budget caps a real store at ~21k memories (~370 MB
-heap, ~2 s load); adaptive sizing raises the budget to at most 20 MB
-on a large repo (~84k memories, ~1.4 GB heap, ~9 s load) — and the
-git-history and code-map ingesters are themselves depth-capped (≤ 1500
-commits, ≤ 10 000 files), so in practice a store lands in the
-15–25k band, not at the theoretical ceiling. If you run on an
-unusually large monorepo and want to hold the memory footprint down,
-lower `maxMemoryBytes` rather than raising it — the budget bounds RAM,
-not just disk.
+**The disk budget bounds RAM, not just disk.** Because heap tracks
+memory count, and memory count tracks bytes stored, the byte budget is
+effectively a RAM ceiling — about **70 MB of heap per 1 MB of
+budget**, if the budget were ever filled. The default budget is 50 MB,
+so the *theoretical* worst case is ~210k memories and ~3.5 GB of heap.
+
+In practice a store never comes close. The git-history and code-map
+ingesters are themselves depth-capped (≤ 1500 commits, ≤ 10 000
+files), so a real store — even on a large repo — lands in the
+**15–25k band: ~4–6 MB on disk, ~300–440 MB of heap**, far below the
+50 MB budget. That is the point of the generous default: at 50 MB the
+budget is a *safety valve* for a runaway monorepo, not a routine
+clipper. The previous 5 MB default was small enough that a normal
+large repo (~25k memories ≈ 6 MB) hit the ceiling and lost useful
+memories to eviction every run; 50 MB ends that.
+
+If you run on an unusually large monorepo and the heap footprint
+matters, `maxMemoryDiskMB` is the single knob — set it **down** (e.g.
+`10`, ~700 MB heap ceiling) to cap RAM hard, or **up** if you have the
+memory and want a deeper store. The budget is the RAM dial.
 
 The fuller answer for a store that genuinely outgrows RAM is to move
 the search index itself onto disk. SQLite is already the durable store
@@ -688,23 +731,46 @@ jq -c 'select(.event == "prefill.complete" and .ms > 1000)' /tmp/diane/*.jsonl
 ### `analyze-logs.py`
 
 A standalone Python script at the repo root that turns one or more
-JSONL files into a structured Markdown or JSON report. Standalone
-means: stdlib only, no plugin imports — you can copy the script to a
-machine that doesn't have the plugin installed and analyse logs that
-came from one that does. Useful for bug reports (`./analyze-logs.py
---json > report.json` and attach it), for quick local debugging
-(`./analyze-logs.py --timeline` shows the full chronological flow), or
-for feeding to an LLM as context (`--json` gives a clean
-machine-readable structure with per-session ingest counts, per-tool
-latency stats, warnings/errors, and a timeline). Examples:
+JSONL files into a report. Standalone means: stdlib only, no plugin
+imports — you can copy the script to a machine that doesn't have the
+plugin installed and analyse logs that came from one that does.
+
+**Every report leads with a plain-language "What happened" summary.**
+The raw log is a stream of dotted event names and typed payloads —
+`prefill.complete`, `ingest.git scanned=1500`, `eviction removed=12` —
+which is precise but assumes you know what each one means. The
+analyzer's first job is to translate that into a numbered, jargon-free
+account of what the plugin did and *why* it mattered, written for
+someone who has never read the plugin's source. For example, instead
+of `ingest.git scanned=1500 commitMemories=80` it writes: "it read
+1,500 commits of Git history and turned them into 80 compact notes
+about which files change together … this is what lets the AI answer
+'what changed recently?' from memory instead of searching your files."
+The technical sections (per-tool latency tables, the event timeline,
+raw ingest counts) follow underneath for anyone who wants them.
+
+`--plain` prints only that plain-language summary — the view for a
+non-specialist or a quick "what did it just do?" check. `--json`
+includes the same explanation as a string array per session, so an LLM
+or downstream tool gets it too. Useful for bug reports
+(`./analyze-logs.py --json > report.json` and attach it), quick local
+debugging (`--timeline` shows the full chronological flow), or feeding
+to an LLM as context. Examples:
 
 ```bash
-./analyze-logs.py                        # latest sessions, Markdown
+./analyze-logs.py                        # plain summary + technical detail
+./analyze-logs.py --plain                # plain-language summary only
 ./analyze-logs.py --tail 3 --timeline    # 3 newest, with chronological flow
-./analyze-logs.py --json                 # JSON for an LLM or further tooling
+./analyze-logs.py --json                 # JSON (carries the explanation too)
 ./analyze-logs.py --root /path/to/repo   # filter to one repo
 ./analyze-logs.py --quiet                # one-line-per-session summary
 ```
+
+The plain-language explainer is covered by `tests/test_analyze_logs.py`
+(Python `unittest`, stdlib only, wired into CI): the tests assert that
+each major step is explained with its real numbers and its reason, and
+that the plain output contains none of the raw event/field identifiers
+— a machine-checkable proxy for "a non-specialist can read this".
 
 The script is intentionally NOT bundled into the published npm
 package — it's a development/debugging aid, not part of the runtime
@@ -726,9 +792,9 @@ after a few days of inactivity. For a manual sweep:
 
 ## Tests & CI
 
-417 assertions across fourteen suites (store, search, ingest, mining,
+444 assertions across fifteen suites (store, search, ingest, mining,
 sessions, code-health, code-map, session-snapshot, adaptive, file-log,
-token-savings, skill-activation, scaling, plugin). The ingest suite exercises a real git fixture
+token-savings, skill-activation, scaling, semantic, plugin). The ingest suite exercises a real git fixture
 and a Rust project fixture; code-map parses a multi-language fixture
 with the real grammars; the session-snapshot suite covers parent
 linkage and pinned-survives-eviction; the plugin suite covers the
@@ -738,15 +804,20 @@ than raw discovery (see *Token savings*, below); the skill-activation
 suite proves a skill mined mid-session is discoverable and loadable in
 that same session, no restart; the scaling suite builds a 4 000-memory
 store and guards correctness plus anti-quadratic timing ceilings (the
-deep curve is `scripts/stress-scale.mjs` — see *Scaling*). CI runs typecheck →
+deep curve is `scripts/stress-scale.mjs` — see *Scaling*). Alongside
+the Bun suites, `tests/test_analyze_logs.py` is a 12-test Python
+(`unittest`, stdlib only) suite for the log analyzer's plain-language
+explainer — it asserts the report stays legible to a non-specialist
+(see *Rich logs*). CI runs typecheck →
 lint (ESLint 9, type-aware) → build → tests → a smoke test of the
-compiled `dist/` → a package-size guard, all on the Bun runtime, then
-a coverage job (`bun test --coverage`) enforces a line/function
-coverage floor and uploads the lcov report. Coverage sits around 80 %
-lines as Bun measures it. There is no Node version matrix — OpenCode
-loads plugins under Bun, so Bun is what's tested. The suites use a
-small self-contained assertion harness, so each runs as a Bun script
-and self-gates on exit code.
+compiled `dist/` → a package-size guard → the Python analyzer tests,
+all on the Bun runtime (with the preinstalled `python3` for the last
+step), then a coverage job (`bun test --coverage`) enforces a
+line/function coverage floor and uploads the lcov report. Coverage
+sits around 90 % lines as Bun measures it. There is no Node version
+matrix — OpenCode loads plugins under Bun, so Bun is what's tested.
+The suites use a small self-contained assertion harness, so each runs
+as a Bun script and self-gates on exit code.
 
 A separate, informational workflow — `compare-aider` — is *not* part
 of the merge gate. It's manually runnable (and runs monthly), installs
@@ -769,11 +840,13 @@ like everything else.
 bun install
 bun run build          # tsc -p tsconfig.json — emits dist/ + .d.ts
 bun run lint           # eslint src tests (type-aware; floating promises = error)
-bun run test           # 417 assertions across fourteen suites
+bun run test           # 444 assertions across fifteen suites
 bun run smoke          # exercises the compiled dist/ as OpenCode would
 bun run check:size     # fails if the package exceeds its size ceiling
 bun run typecheck      # no emit
 bun run coverage:check # bun test --coverage, fails under the coverage floor
+bun run test:analyzer  # python tests for the log analyzer's plain-language report
+bun run verify:semantic # optional: runs the real e5 model on RU/EN/ZH fixtures
 ```
 
 CI (`.github/workflows/ci.yml`) runs typecheck → lint → build → test →
@@ -912,16 +985,92 @@ both `并发编程` "concurrent programming" and `AI 编程` "AI programming"),
 so partial-match false positives happen — the same class of imprecision
 BM25 has for English. A statistical segmenter (jieba-style) would be
 more precise, but its dictionary alone is several MB and would break
-the package-size budget; embedding models (multilingual fastText and
-the like) are out of scope for the same size reason and because the
-plugin is deliberately embedding-free and deterministic. Bigrams are
-the right point on that curve for this plugin.
+the package-size budget, so bigrams are the right point on that curve
+for the *lexical* index — which is the always-on default. (Genuine
+cross-lingual recall is a different problem with its own opt-in
+answer, *Semantic search*, below.)
 
 One known refinement: the token-budget estimate is a flat ~4
 chars/token heuristic, which slightly *under*-counts CJK (CJK is
 denser per model token), so recall packs marginally more CJK content
 than the budget intends. It's a small imprecision in packing, not a
 correctness problem.
+
+Note the scope of all the above: bigrams make retrieval work *within*
+a language — a Chinese query finding Chinese text. They cannot do
+*cross-lingual* recall — a Chinese or Russian query finding code
+commented in English — because lexical search matches tokens, and
+different scripts share none. That is a genuinely different problem,
+and it has its own opt-in answer below.
+
+## Semantic search
+
+`enableSemanticSearch` (default **off**) adds opt-in **cross-lingual**
+retrieval: a query in one language finding code and comments written
+in another — e.g. a Russian or Chinese query surfacing an
+English-commented function. Lexical BM25 structurally cannot do this
+(a Russian query and English content share zero tokens); it needs an
+embedding model that places the languages in one shared vector space.
+
+**How it works.** With the flag on, the plugin loads a small
+multilingual embedding model — `intfloat/e5` via the optional
+`@huggingface/transformers` dependency, default
+`Xenova/multilingual-e5-small` (~120 MB, ~384-dim, 100+ languages,
+downloaded and cached on first use). A background pass after prefill
+embeds every memory and stores the vectors in a **separate**
+`.opencode/diane-vectors.db`; the pass is incremental and crash-safe,
+so each memory is embedded once and reused across sessions. On a
+recall, the query is embedded and the two rankings — BM25 lexical and
+vector similarity — are merged with reciprocal-rank fusion (RRF), the
+standard position-only blend that needs no score calibration. The
+recall path itself stays synchronous: only the query embedding is
+async, done in the tool handler before the sync ranking.
+
+**Off by default, and off means off.** When `enableSemanticSearch` is
+false: no model is downloaded, `@huggingface/transformers` is never
+imported (it is an *optional* peer dependency — a normal install never
+pulls it in), no vector database is created, and `recallDetailed`
+takes the byte-for-byte unchanged lexical path. The plugin's full
+existing test suite runs with the feature off and is the regression
+proof that the default path is untouched.
+
+**Enabling it.**
+
+```sh
+bun add @huggingface/transformers      # the optional dependency
+```
+
+```jsonc
+// opencode.json
+["opencode-diane", { "enableSemanticSearch": true }]
+```
+
+If the flag is on but the dependency is missing or the model can't be
+fetched, the plugin logs a warning and falls back to lexical search —
+enabling the flag never breaks recall.
+
+**Cost, honestly.** The model is a real dependency: a one-time ~120 MB
+download, a few hundred MB of process RAM while loaded, and a
+background embedding pass that takes a few minutes on a large store
+the first time (incremental and cached thereafter). Each recall adds
+one query embedding (~tens of ms on CPU) plus a brute-force cosine
+scan (sub-millisecond at realistic store sizes). And it trades away
+the plugin's signature property: BM25 is inspectable — you can see
+*why* a hit matched — whereas an embedding match is a black box. That
+is the deliberate tradeoff for crossing languages, which is why it is
+opt-in rather than default.
+
+**What is tested, and how.** diane's *pipeline* — the vector store,
+RRF fusion, the recall gating, graceful degradation, and end-to-end
+RU/EN/ZH cross-lingual retrieval — is covered in CI (`semantic.test.ts`)
+by a deterministic stub embedder with a built-in trilingual concept
+lexicon. The stub is used on purpose: the cross-lingual *quality* is a
+property of Microsoft's e5 model, benchmarked by its authors, and CI
+should not re-prove it by downloading 120 MB on every run. The real
+model is verified separately by `scripts/verify-semantic.mjs` (run it
+once where the Hugging Face Hub is reachable: `bun run verify:semantic`)
+— it embeds Russian, English and Chinese code comments and confirms
+each cross-lingual query retrieves the right passage.
 
 ## Real-world usefulness — when it helps, when it doesn't
 
@@ -977,10 +1126,11 @@ commits and the code map gave compact, accurate API digests.
 - *Very small repos.* Little history → raw discovery was already cheap;
   `measure-savings.mjs` reports such cases as inconclusive, not a win.
 
-**Keyword-on-filename bias.** Retrieval is keyword BM25 (the deliberate
-no-embeddings choice) and it scores file *paths* as well as content, so
-a file *named* after a concept can outrank the real implementation.
-This was the most consistent weakness across the dry runs: on `express`,
+**Keyword-on-filename bias.** Default retrieval is keyword BM25 (the
+deliberate embedding-free default) and it scores file *paths* as well
+as content, so a file *named* after a concept can outrank the real
+implementation. This was the most consistent weakness across the dry
+runs: on `express`,
 "routing and middleware" surfaced `test/middleware.basic.js` and a
 benchmark over `lib/router/`; on `rocksdb`, "write ahead log" surfaced
 test and bench files; on `spring-framework`, "bean lifecycle" surfaced
@@ -1027,10 +1177,11 @@ running it. A quick manual check, in a real repo under OpenCode:
 
 ## What it is not
 
-- **Not a vector store.** No embeddings, no neural ranker.
+- **Not a vector store by default.** Lexical BM25, no neural ranker —
+  though cross-lingual semantic search is an explicit opt-in.
 - **Not an LLM.** No model is bundled or called; everything is
   deterministic structure + BM25.
-- **Not a long-term notebook.** Default 5 MB, LFU eviction — rarely-used facts age out.
+- **Not an unbounded archive.** A configurable disk budget (50 MB default); least-used facts age out via LFU eviction.
 - **Not a substitute for AGENTS.md.** AGENTS.md is for fuzzy guidance every turn; this is for facts surfaced on demand.
 - **Not lossy by intent.** The store keeps verbatim content; eviction only kicks in over budget.
 

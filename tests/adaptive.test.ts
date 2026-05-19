@@ -3,7 +3,7 @@
  *
  * Covers the tier classification (by commit count and by file count),
  * `applyAdaptiveTuning`'s respect for explicit user keys, the
- * adaptive:false no-op, the "budget never drops below 5 MB" rule, and
+ * adaptive:false no-op, the "adaptive does not touch the disk budget" rule, and
  * `measureRepo`'s git → file-count fallback.
  */
 
@@ -33,7 +33,7 @@ function assert(cond: boolean, label: string): void {
 /** A baseline ResolvedConfig — medium-tier fixed defaults, nothing explicit. */
 function baseConfig(explicit: Array<keyof UserConfig> = []): ResolvedConfig {
   return {
-    maxMemoryBytes: 5 * 1024 * 1024,
+    maxMemoryBytes: 50 * 1024 * 1024,
     autoIngestOnStartup: true,
     gitHistoryDepth: 500,
     forceActive: false,
@@ -105,14 +105,17 @@ async function main(): Promise<void> {
   assert(cSmall.gitHistoryDepth === 250, "small tier sets gitHistoryDepth=250")
   assert(cSmall.codeMapMaxFiles === 1500, "small tier sets codeMapMaxFiles=1500")
   assert(
-    cSmall.maxMemoryBytes === 5 * 1024 * 1024,
-    "small tier keeps the 5 MB budget — never shrinks it"
+    cSmall.maxMemoryBytes === 50 * 1024 * 1024,
+    "small tier leaves the 50 MB budget untouched (budget is tier-independent)"
   )
 
   const cLarge = baseConfig()
   applyAdaptiveTuning(cLarge, { basis: "commits", value: 9000, tier: "large" })
   assert(cLarge.gitHistoryDepth === 1500, "large tier sets gitHistoryDepth=1500")
-  assert(cLarge.maxMemoryBytes === 20 * 1024 * 1024, "large tier raises budget to 20 MB")
+  assert(
+    cLarge.maxMemoryBytes === 50 * 1024 * 1024,
+    "large tier leaves the 50 MB budget untouched — adaptation never scales it"
+  )
   assert(cLarge.codeMapMaxFiles === 10000, "large tier sets codeMapMaxFiles=10000")
 
   // ── explicit user keys are never overridden ────────────────────────
@@ -127,7 +130,7 @@ async function main(): Promise<void> {
   )
   assert(
     cExplicit.maxMemoryBytes === 3 * 1024 * 1024,
-    "explicit budget is not overridden — even below the 5 MB floor"
+    "explicit budget is not overridden — even below the 50 MB default"
   )
   assert(
     cExplicit.codeMapMaxFiles === 10000,
@@ -140,7 +143,7 @@ async function main(): Promise<void> {
   cOff.adaptive = false
   const offResult = applyAdaptiveTuning(cOff, { basis: "commits", value: 9000, tier: "large" })
   assert(cOff.gitHistoryDepth === 500, "adaptive:false leaves gitHistoryDepth at the fixed default")
-  assert(cOff.maxMemoryBytes === 5 * 1024 * 1024, "adaptive:false leaves the budget untouched")
+  assert(cOff.maxMemoryBytes === 50 * 1024 * 1024, "adaptive:false leaves the budget untouched")
   assert(cOff.codeMapMaxFiles === 4000, "adaptive:false leaves codeMapMaxFiles untouched")
   assert(
     offResult.summary.includes("off"),

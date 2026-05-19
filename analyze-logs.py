@@ -9,6 +9,11 @@ OpenCode process). This script reads those files and produces either a
 Markdown report (default — readable in a terminal or pasted into a PR)
 or a JSON document (for further analysis or feeding to an LLM).
 
+Every report leads with a **plain-language "What happened" summary** —
+a jargon-free account of what the plugin did and *why* it mattered,
+written for someone who has never read the plugin's source. Use
+`--plain` to print only that summary.
+
 The script is completely standalone: it depends only on the Python
 standard library (3.8+) and knows nothing about the plugin's source —
 it only knows the record shape the plugin writes. That means you can
@@ -19,6 +24,7 @@ Usage
 -----
 
     ./analyze-logs.py                       # latest sessions in default dir
+    ./analyze-logs.py --plain               # plain-language summary only
     ./analyze-logs.py --tail 3              # only the 3 most recent
     ./analyze-logs.py --json                # JSON instead of Markdown
     ./analyze-logs.py --dir /custom/path    # custom log directory
@@ -212,6 +218,21 @@ def session_summary(path: Path, records: List[Dict[str, Any]], parse_failures: i
             }
             ingest_events[name] = payload
 
+    # Capture the lifecycle events' payloads — everything that is not a
+    # tool call, an ingest.* event, or the session header. The
+    # plain-language explainer reads these to describe what each step
+    # did and why. Most are singletons; a few (eviction) can recur, so
+    # each name maps to a list of payloads.
+    key_events: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for r in events_only:
+        name = str(r.get("event", ""))
+        if name == "tool.call" or name.startswith("ingest.") or name == "session.start":
+            continue
+        payload = {
+            k: v for k, v in r.items() if k not in ("ts", "service", "root", "event")
+        }
+        key_events[name].append(payload)
+
     # Warnings + errors come from two streams: prose lines with
     # level=warn/error, and structured events whose name ends in
     # .failed (prefill.failed, mining.failed) or where ok==false.
@@ -269,6 +290,7 @@ def session_summary(path: Path, records: List[Dict[str, Any]], parse_failures: i
         "prose_line_count": len(prose_only),
         "event_counts": dict(event_counts),
         "ingest": ingest_events,
+        "key_events": dict(key_events),
         "tool_calls_total": len(tool_calls),
         "tool_stats": tool_stats,
         "tool_calls_detail": [
@@ -403,6 +425,286 @@ def _fmt_payload(payload: Dict[str, Any]) -> str:
     return ", ".join(parts) or "(empty)"
 
 
+# ─── plain-language explainer ──────────────────────────────────────────
+#
+# Everything above turns the raw log into structured numbers. This
+# section turns the structured numbers into plain English: a short
+# account of WHAT the plugin did and WHY it mattered, written for
+# someone who has never read the plugin's source and does not know
+# what "prefill" or "ingest.git" or "p95" mean. The technical sections
+# of the report still carry the raw detail; this is the layer a
+# non-specialist reads first (and the only thing `--plain` prints).
+
+
+def _ev(s: Dict[str, Any], name: str) -> Optional[Dict[str, Any]]:
+    """First captured payload of a lifecycle event, or None."""
+    lst = (s.get("key_events") or {}).get(name) or []
+    return lst[0] if lst else None
+
+
+def _plural(n: int, one: str, many: Optional[str] = None) -> str:
+    """Pick the singular or plural word for a count."""
+    return one if n == 1 else (many if many is not None else one + "s")
+
+
+def explain_session(s: Dict[str, Any]) -> List[str]:
+    """
+    A plain-language, jargon-free account of what the plugin did in one
+    session and *why* — each entry is one "what happened, and why it
+    mattered" point. No raw event names, no field names, no latency
+    percentiles: those live in the technical sections. This is what
+    makes the report legible to a non-specialist.
+    """
+    if s.get("empty"):
+        return ["This log file was empty — the plugin recorded no activity for it."]
+
+    out: List[str] = []
+    ke = s.get("key_events") or {}
+    ingest = s.get("ingest") or {}
+
+    # Idle — the plugin decided there was nothing to do.
+    if "plugin.idle" in ke:
+        return [
+            "The plugin looked at this folder and then stayed switched off: it "
+            "is not a Git repository and has no recognised project files (a "
+            "package manifest, a build config, and the like), so there was "
+            "nothing for it to build a memory from. This is expected behaviour, "
+            "not a fault — the plugin only activates for a real project."
+        ]
+
+    # Startup.
+    active = _ev(s, "plugin.active")
+    if active is not None and isinstance(active.get("storeSize"), int):
+        n = active["storeSize"]
+        out.append(
+            f"The memory plugin started up for this project. It loaded the "
+            f"memory it had saved on earlier runs — {n} stored "
+            f"{_plural(n, 'item')} — and continued from there. (That memory is "
+            f"kept in a small database inside the project and survives between "
+            f"sessions.)"
+        )
+    else:
+        out.append("The memory plugin started up and loaded its saved memory for this project.")
+
+    # Adaptive sizing.
+    tuned = _ev(s, "adaptive.tuned")
+    if tuned is not None:
+        signal = tuned.get("signal") or {}
+        tier, value, basis = signal.get("tier"), signal.get("value"), signal.get("basis")
+        if tier and isinstance(value, int) and basis:
+            out.append(
+                f"It measured how large the repository is — {value:,} {basis} "
+                f"— and sized itself for a {tier} project. A larger repository "
+                f"is indexed more deeply and a small one more lightly, so the "
+                f"plugin does an amount of work that fits the project instead "
+                f"of a fixed amount."
+            )
+        else:
+            out.append(
+                "It measured the repository's size and adjusted how much "
+                "history to index to match it — more for a large project, "
+                "less for a small one."
+            )
+
+    # Prefill — the headline of most sessions.
+    if "prefill.complete" in ke:
+        pc = _ev(s, "prefill.complete")
+        did: List[str] = []
+        g = ingest.get("ingest.git")
+        if g is not None and isinstance(g.get("scanned"), int):
+            made = g.get("commitMemories")
+            made_txt = f"{made}" if isinstance(made, int) else "several"
+            made_n = made if isinstance(made, int) else 2
+            did.append(
+                f"read {g['scanned']:,} {_plural(g['scanned'], 'commit')} of "
+                f"Git history and turned them into {made_txt} compact "
+                f"{_plural(made_n, 'note')} about which files change together, "
+                f"which change most often, and what changed recently"
+            )
+        p = ingest.get("ingest.project")
+        if p is not None and isinstance(p.get("facts"), int):
+            did.append(
+                f"looked over the project's build and configuration files and "
+                f"recorded {p['facts']} plain {_plural(p['facts'], 'fact')} "
+                f"about them (the language, the build tooling, and so on)"
+            )
+        ses = ingest.get("ingest.sessions")
+        if ses is not None and isinstance(ses.get("sessions"), int) and ses["sessions"] > 0:
+            did.append(
+                f"took in {ses['sessions']} earlier coding "
+                f"{_plural(ses['sessions'], 'session')} on this project so "
+                f"that past work can be found again"
+            )
+        cm = ingest.get("ingest.code-map")
+        if cm is not None and isinstance(cm.get("filesParsed"), int):
+            did.append(
+                f"parsed {cm['filesParsed']:,} source "
+                f"{_plural(cm['filesParsed'], 'file')} into a map of the "
+                f"functions and classes they define"
+            )
+        ms = (pc or {}).get("ms")
+        took = (
+            f" The whole scan took {_fmt_duration(ms / 1000)}."
+            if isinstance(ms, (int, float))
+            else ""
+        )
+        body = (
+            "When it started, the plugin scanned the project in the background "
+            "and refreshed its memory. This is the step that lets the AI "
+            "answer questions like \u201cwhere is this handled?\u201d or "
+            "\u201cwhat changed recently?\u201d straight from memory, instead "
+            "of opening and searching your files every time — which is much "
+            "slower and costs far more tokens. In this run it "
+        )
+        body += ("; ".join(did) + "." if did else "found nothing new to add since the last run.")
+        out.append(body + took)
+    elif "prefill.failed" in ke:
+        pf = _ev(s, "prefill.failed")
+        why = (pf or {}).get("error") or "an unexpected error"
+        out.append(
+            f"The startup scan did not finish — it stopped with: {why}. The "
+            f"assistant still works, but for this session it falls back to "
+            f"searching your files directly instead of using prepared memory."
+        )
+
+    # Code map skipped.
+    skipped = ingest.get("ingest.code-map.skipped")
+    if skipped is not None:
+        why = skipped.get("reason") or "it was not available"
+        out.append(
+            f"The optional code map — a structural index of function and class "
+            f"signatures — was not built this run ({why}). It is an opt-in "
+            f"extra, and the rest of the memory works without it."
+        )
+
+    # Eviction.
+    if "eviction" in ke:
+        removed = sum(
+            p.get("removed", 0)
+            for p in ke.get("eviction", [])
+            if isinstance(p.get("removed"), int)
+        )
+        if removed > 0:
+            out.append(
+                f"The memory store reached its size limit, so the {removed} "
+                f"least-used {_plural(removed, 'item')} "
+                f"{_plural(removed, 'was', 'were')} dropped to make room. "
+                f"Items that are used often, and any that are pinned, are "
+                f"always kept. This is routine housekeeping — it stops the "
+                f"memory from growing without bound."
+            )
+
+    # Snapshot resume.
+    if "snapshot.resume" in ke:
+        out.append(
+            "It found a snapshot saved by a previous session and resumed from "
+            "it, so the assistant could pick up the thread instead of starting "
+            "from a blank slate."
+        )
+
+    # Semantic search.
+    if "semantic.ready" in ke:
+        sr = _ev(s, "semantic.ready")
+        model = (sr or {}).get("model") or "a multilingual model"
+        msg = (
+            f"Cross-lingual semantic search is switched on. The plugin loaded "
+            f"its language model ({model}) so that a search written in one "
+            f"language can find code and comments written in another."
+        )
+        emb = _ev(s, "semantic.embedded")
+        if emb is not None and isinstance(emb.get("embedded"), int):
+            msg += (
+                f" In the background it prepared {emb['embedded']} "
+                f"{_plural(emb['embedded'], 'memory', 'memories')} for that "
+                f"kind of search."
+            )
+        out.append(msg)
+    elif "semantic.unavailable" in ke:
+        su = _ev(s, "semantic.unavailable")
+        why = (su or {}).get("reason") or "the required package was missing"
+        out.append(
+            f"Semantic (cross-language) search was switched on but could not "
+            f"start ({why}), so the plugin quietly used ordinary keyword search "
+            f"instead. Nothing was broken by this — searches simply stayed "
+            f"within one language."
+        )
+
+    # What the AI did with its memory.
+    tool_stats = s.get("tool_stats") or {}
+    total = s.get("tool_calls_total") or 0
+    if total > 0:
+        recalls = (tool_stats.get("memory_recall") or {}).get("calls", 0)
+        saves = (tool_stats.get("memory_remember") or {}).get("calls", 0)
+        bits: List[str] = []
+        if recalls:
+            bits.append(f"searched its memory {recalls} {_plural(recalls, 'time')}")
+        if saves:
+            bits.append(f"saved {saves} new {_plural(saves, 'note')}")
+        other = total - recalls - saves
+        if other > 0:
+            bits.append(f"used other memory tools {other} {_plural(other, 'time')}")
+        detail = "; ".join(bits) if bits else f"used memory tools {total} times"
+        out.append(
+            f"During the session the AI {detail}. Each memory search takes the "
+            f"place of several file reads, which is the whole point of the "
+            f"plugin — it makes the assistant faster and cheaper to run."
+        )
+    else:
+        out.append(
+            "The AI did not use any of the memory tools in this session — no "
+            "searches or saved notes were recorded. (The memory was still "
+            "prepared and ready; it simply was not queried this time.)"
+        )
+
+    # Skill mining.
+    mc = _ev(s, "mining.complete")
+    if mc is not None and isinstance(mc.get("skillsWritten"), int) and mc["skillsWritten"] > 0:
+        n = mc["skillsWritten"]
+        out.append(
+            f"It also distilled {n} reusable \u201cskill\u201d "
+            f"{_plural(n, 'file')} — short how-to notes drawn from repeated "
+            f"patterns of work and saved where the AI can reuse them later."
+        )
+
+    # Closing — did anything go wrong?
+    we = s.get("warnings_errors") or []
+    if we:
+        out.append(
+            f"Finally, {len(we)} {_plural(len(we), 'thing')} "
+            f"{_plural(len(we), 'was', 'were')} logged as a warning or error "
+            f"this session. The \u201cWarnings & errors\u201d section below "
+            f"lists each one — they do not necessarily mean the session "
+            f"failed, but they are worth a look."
+        )
+    else:
+        out.append(
+            "Nothing was logged as a warning or an error — this session looks clean."
+        )
+
+    return out
+
+
+def _what_happened_md(s: Dict[str, Any]) -> str:
+    """
+    Render the plain-language 'What happened' section for one session —
+    a context line plus the numbered explanation. Shared by the full
+    Markdown report and the `--plain` view.
+    """
+    out = ["### What happened\n\n"]
+    root = s.get("root") or "this project"
+    dur = _fmt_duration(s.get("duration_s"))
+    ctx = f"Session on `{root}`"
+    if dur != "—":
+        ctx += f" — lasted {dur}"
+    if isinstance(s.get("record_count"), int):
+        ctx += f", {s['record_count']} log {_plural(s['record_count'], 'record')}"
+    out.append(ctx + ".\n\n")
+    for i, point in enumerate(s.get("explanation") or explain_session(s), 1):
+        out.append(f"{i}. {point}\n")
+    out.append("\n")
+    return "".join(out)
+
+
 def render_aggregate_md(agg: Dict[str, Any]) -> str:
     out = ["## Across all sessions\n"]
     out.append(
@@ -446,10 +748,16 @@ def render_aggregate_md(agg: Dict[str, Any]) -> str:
 
 def render_session_md(s: Dict[str, Any], include_timeline: bool) -> str:
     name = Path(s["path"]).name
-    if s.get("empty"):
-        return f"## Session — `{name}`\n_(empty file)_\n\n"
-
     out = [f"## Session — `{name}`\n\n"]
+
+    # Lead with the plain-language account — this is the part a
+    # non-specialist reads. The technical sections follow it.
+    out.append(_what_happened_md(s))
+
+    if s.get("empty"):
+        return "".join(out)
+
+    out.append("### Details\n\n")
     out.append(f"- **Root:** `{s.get('root') or '—'}`\n")
     out.append(f"- **Started:** {s.get('start_ts')}\n")
     out.append(f"- **Duration:** {_fmt_duration(s.get('duration_s'))}\n")
@@ -538,6 +846,28 @@ def render_markdown(report: Dict[str, Any], args: argparse.Namespace) -> str:
     return "".join(out)
 
 
+def render_plain(report: Dict[str, Any]) -> str:
+    """
+    Plain-language only — the 'what happened and why' for each session,
+    with none of the technical tables. This is the view for someone who
+    just wants to know what the plugin did, in words.
+    """
+    out = ["# opencode-diane — what happened\n\n"]
+    out.append(
+        "A plain-language account of what the memory plugin did in each "
+        "logged session — what each step was for, and why it mattered. Run "
+        "the analyzer without `--plain` for the full report with timings, "
+        "per-tool tables and the event timeline.\n\n"
+    )
+    if not report["sessions"]:
+        out.append("_No log sessions were found._\n")
+        return "".join(out)
+    for s in report["sessions"]:
+        out.append(f"## Session — `{Path(s['path']).name}`\n\n")
+        out.append(_what_happened_md(s))
+    return "".join(out)
+
+
 def render_quiet(report: Dict[str, Any]) -> str:
     """One-line-per-session minimal output."""
     lines = []
@@ -588,6 +918,10 @@ def build_report(files: List[Path], source_dir: Path, root_filter: Optional[str]
         s = session_summary(f, records, parse_failures)
         if root_filter and s.get("root") != root_filter:
             continue
+        # The plain-language "what happened and why" account — attached
+        # here so it rides along in both the Markdown and the JSON
+        # output.
+        s["explanation"] = explain_session(s)
         sessions.append(s)
     # Sort newest-first by start_ts so the report leads with what
     # someone debugging is most likely to want.
@@ -617,6 +951,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         epilog=(
             "examples:\n"
             "  ./analyze-logs.py                 # latest sessions, Markdown\n"
+            "  ./analyze-logs.py --plain         # plain-language summary only\n"
             "  ./analyze-logs.py --json --tail 5 # 5 newest, JSON for an LLM\n"
             "  ./analyze-logs.py --timeline      # include chronological event listing\n"
             "  ./analyze-logs.py --root /repo    # filter to a specific repo\n"
@@ -649,6 +984,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="minimal one-line-per-session output (overrides --json)",
     )
     p.add_argument(
+        "--plain",
+        action="store_true",
+        help="plain-language 'what happened and why' only — no technical "
+        "tables; the view for a non-specialist (overrides --json)",
+    )
+    p.add_argument(
         "--version", action="version", version=f"analyze-logs.py {SCRIPT_VERSION}"
     )
     return p.parse_args(argv)
@@ -672,6 +1013,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.quiet:
         sys.stdout.write(render_quiet(report))
+    elif args.plain:
+        sys.stdout.write(render_plain(report))
     elif args.json:
         json.dump(report, sys.stdout, indent=2, default=str)
         sys.stdout.write("\n")

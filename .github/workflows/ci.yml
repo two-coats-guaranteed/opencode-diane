@@ -51,6 +51,12 @@ jobs:
         # ballooning the install with another large grammar.
         run: bun run check:size
 
+      - name: Test the log analyzer (python)
+        # analyze-logs.py is a standalone stdlib-only Python tool; its
+        # tests verify the plain-language report stays legible to a
+        # non-specialist. python3 is preinstalled on ubuntu-latest.
+        run: python3 tests/test_analyze_logs.py
+
   # ─── Coverage: runs once, enforces the floor, publishes the report ─
   coverage:
     name: coverage

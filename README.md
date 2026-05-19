@@ -23,6 +23,8 @@ dictates what it learns about the codebase; Diane keeps it.
   MODERATE / LOW verdict before you rely on it.
 - **Deterministic.** BM25 over a hand-built index — no embeddings, no
   model, no API key, no GPU, no network. Reproducible and debuggable.
+  (One opt-in exception: semantic search — off by default — adds an
+  embedding model for cross-lingual recall. See below.)
 - **Convention-free.** It never parses commit messages for meaning;
   every signal is a physical fact (files touched, lines ±, co-change).
   It behaves identically on a `wip` / `.` / `更新` history and a
@@ -30,10 +32,12 @@ dictates what it learns about the codebase; Diane keeps it.
 - **What it costs.** Core plugin: ~77 KB plus one small dependency; a
   few hundred MB of RAM for a large store. The optional code map adds
   ~16 MB of vendored grammar files.
-- **What it is not.** Not a vector store, not an LLM, not a long-term
-  notebook (5 MB budget — least-used facts age out), not a replacement
-  for `AGENTS.md`.
-- **Maturity.** 417 assertions across 14 test suites, ~80 % line
+- **What it is not.** Not an LLM, not an unbounded archive (a
+  configurable disk budget, 50 MB by default, ages out least-used
+  facts), not a replacement for `AGENTS.md`. Not a vector store by
+  default — lexical BM25 — though cross-lingual semantic search is
+  available as an explicit opt-in.
+- **Maturity.** 444 assertions across 15 test suites, ~90 % line
   coverage; verified against the documented plugin contract and
   dry-run on real repos in 10 languages. Not yet run end-to-end inside
   a live OpenCode *server* — see the WIKI.
@@ -119,7 +123,7 @@ malformed config never breaks the plugin.
 
 ```ts
 interface UserConfig {
-  maxMemoryDiskMB?: number       // default 5
+  maxMemoryDiskMB?: number       // default 50
   autoIngestOnStartup?: boolean  // default true
   gitHistoryDepth?: number       // default 500
   forceActive?: boolean          // default false
@@ -129,13 +133,35 @@ interface UserConfig {
   enableCodeMap?: boolean        // default false  (see WIKI: Code map)
   enableNudgeHook?: boolean      // default true   (see WIKI: Compatibility)
   adaptive?: boolean             // default true   (see WIKI: Adaptive sizing)
+  enableSemanticSearch?: boolean // default false  (see WIKI: Semantic search)
+  embeddingModel?: string        // default "Xenova/multilingual-e5-small"
+  personalizedPageRank?: boolean // default false  (co-change ranking; see WIKI)
 }
 ```
 
 With `adaptive` on (the default), prefill measures one cheap signal —
 commit count, or file count when there is no git — and scales the
-history depth, code-map file cap, and disk budget to the repo's size.
-An explicit value in your config always wins.
+history depth and code-map file cap to the repo's size. An explicit
+value in your config always wins.
+
+`maxMemoryDiskMB` is the disk budget for the memory store: once it is
+exceeded, least-used memories are evicted (pinned ones never). The
+default is 50 MB — generous enough that a realistic store (even on a
+large repo, ~4–6 MB) never hits it, so eviction acts as a safety valve
+rather than a routine clip. Note it also bounds RAM: the search index
+is held in memory at roughly 70 MB of heap per 1 MB of budget *if
+filled*, so on an unusually large monorepo, lower it to cap memory or
+raise it for a deeper store. See *Performance* in the WIKI.
+
+`enableSemanticSearch` (default **off**) adds opt-in cross-lingual
+recall: with it on, the plugin also embeds memories with a small
+multilingual e5 model and fuses vector similarity with the BM25
+ranking, so a query in one language (Russian, Chinese, …) can retrieve
+code and comments written in another. It needs the optional
+`@huggingface/transformers` dependency (`bun add @huggingface/transformers`);
+the model downloads on first use. When off — the default — no model is
+downloaded, the dependency is never loaded, and retrieval is the
+unchanged lexical path. See *Semantic search* in the WIKI.
 
 ## Learn more
 
@@ -146,6 +172,7 @@ An explicit value in your config always wins.
 - *The pillars* — retrieval, prefill, code-health, and the rest, with diagrams
 - *How it compares* — versus embeddings, aider's repo-map, and `AGENTS.md`
 - *Without git history* — what works, what doesn't, and why
+- *Semantic search* — the opt-in cross-lingual embedding feature
 - *Token savings* — what reduction to expect, and how it is measured
 - *Performance* & *Scaling* — measured numbers, and the honest heap caveat
 - *Code map*, *Session snapshots*, *Skill mining*, *Rich logs*, *Tests & CI*

@@ -219,7 +219,7 @@ clap = "4"
   // ── git history: messages carry NO signal, structure carries all ──
   console.log("\n── ingest: git history (culture-free commit messages) ────")
   const gRoot = await mkdtemp(join(tmpdir(), "diane-mem-git-"))
-  git(gRoot, ["init", "--initial-branch=main", "-q"])
+  git(gRoot, ["init", "-q"])
   git(gRoot, ["config", "user.email", "test@example.com"])
   git(gRoot, ["config", "user.name", "test"])
 

@@ -49,8 +49,10 @@
 import type { Memory, RecallHit, Category, ResolvedConfig } from "../types.js"
 import { InvertedIndex } from "../search/inverted-index.js"
 import { search, packToTokenBudget, type SearchOptions } from "../search/bm25.js"
+import { reciprocalRankFusion } from "../search/embedder.js"
 import { evictIfOverBudget } from "./eviction.js"
 import { SqliteStore, type LoadedStore } from "./sqlite-store.js"
+import type { VectorStore } from "./vector-store.js"
 
 const PERSIST_DEBOUNCE_MS = 400
 const STORE_OVERHEAD_BYTES = 64
@@ -102,6 +104,13 @@ export class MemoryRepository {
   private pendingDeleted = new Set<string>()
   /** Whether `meta` changed since the last flush. */
   private metaDirty = false
+
+  /**
+   * Optional semantic-search index. Attached by the plugin only when
+   * `enableSemanticSearch` is on; `undefined` otherwise, in which case
+   * every recall takes the unchanged pure-lexical path.
+   */
+  private vectorStore?: VectorStore
 
   private constructor(root: string, sqlite: SqliteStore, loaded: LoadedStore) {
     this.root = root
@@ -258,6 +267,58 @@ export class MemoryRepository {
   }
 
   /**
+   * Attach a semantic vector index. Once attached, a recall that
+   * carries a `queryVector` fuses vector similarity with the lexical
+   * ranking; a recall without one, or before this is called, is
+   * unaffected. Idempotent.
+   */
+  attachVectorStore(vs: VectorStore): void {
+    this.vectorStore = vs
+  }
+
+  /**
+   * Rank candidates for a recall.
+   *
+   * With no vector store attached, or no `queryVector` supplied, this
+   * is exactly the historical lexical path — `search()` and nothing
+   * else. That keeps the default (semantic-search-off) configuration
+   * byte-for-byte unchanged.
+   *
+   * With both present, it fuses two rankings via reciprocal-rank
+   * fusion: the BM25 lexical ranking and a vector-similarity ranking.
+   * A larger candidate pool is drawn from each side so a hit that is
+   * strong in only one ranking can still surface, then the fused list
+   * is trimmed back to `limit`. Vector candidates are filtered to the
+   * same category/subject scope as the lexical query.
+   */
+  private rankCandidates(opts: SearchOptions): RecallHit[] {
+    if (!this.vectorStore || !opts.queryVector) {
+      return search(this.index, this.byId, opts)
+    }
+    const limit = opts.limit ?? 25
+    const pool = Math.max(limit, 50)
+    const lexical = search(this.index, this.byId, { ...opts, limit: pool })
+    const vector = this.vectorStore.search(opts.queryVector, pool).filter((r) => {
+      const m = this.byId.get(r.id)
+      if (!m) return false
+      if (opts.category && m.category !== opts.category) return false
+      if (opts.subject && m.subject !== opts.subject) return false
+      return true
+    })
+    const fused = reciprocalRankFusion([
+      lexical.map((h) => h.memory.id),
+      vector.map((v) => v.id),
+    ])
+    const hits: RecallHit[] = []
+    for (const f of fused) {
+      const m = this.byId.get(f.id)
+      if (m) hits.push({ memory: m, score: f.score })
+      if (hits.length >= limit) break
+    }
+    return hits
+  }
+
+  /**
    * Budget-aware recall. `search()` ranks (and count-limits via
    * `opts.limit`); if `opts.tokenBudget` is set *and* a `format`
    * function is supplied, the ranked hits are then packed to that
@@ -268,7 +329,7 @@ export class MemoryRepository {
     opts: SearchOptions,
     format?: (h: RecallHit) => string
   ): { hits: RecallHit[]; omitted: number } {
-    const ranked = search(this.index, this.byId, opts)
+    const ranked = this.rankCandidates(opts)
     let kept = ranked
     let omitted = 0
     if (opts.tokenBudget && opts.tokenBudget > 0 && format) {

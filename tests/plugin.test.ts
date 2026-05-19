@@ -87,7 +87,7 @@ async function main(): Promise<void> {
   await writeFile(join(root, "README.md"), "# demo\n\nA Go service.\n")
   await mkdir(join(root, "cmd"), { recursive: true })
   await writeFile(join(root, "cmd", "main.go"), "package main\nfunc main() {}\n")
-  git(root, ["init", "-q", "--initial-branch=main"])
+  git(root, ["init", "-q"])
   git(root, ["config", "user.email", "t@e.com"])
   git(root, ["config", "user.name", "t"])
   git(root, ["add", "."])

@@ -24,10 +24,14 @@ export type RepoTier = "small" | "medium" | "large"
  * The tier table. Each tier names the size-derived knobs.
  *
  *   - gitHistoryDepth   — commits the git ingester walks.
- *   - maxMemoryDiskMB   — disk budget. NOTE: never set below 5; small
- *                         repos keep the full default budget, only
- *                         large repos get a bigger one. Adaptation
- *                         raises this knob, never lowers it.
+ *   - maxMemoryDiskMB   — disk budget. Deliberately uniform across
+ *                         tiers: the 50 MB default is generous enough
+ *                         for every realistic repo (a depth-capped
+ *                         large repo's store is ~6–8 MB), so the
+ *                         budget no longer needs to scale with size.
+ *                         The knob is kept in the table so a future
+ *                         version could raise it for genuine
+ *                         monorepos; adaptation never lowers it.
  *   - codeMapMaxFiles   — cap on files the code-map ingester parses.
  *   - coChangeMaxCommits— above this commit count the O(commits ×
  *                         files²) co-change pass is skipped entirely.
@@ -42,19 +46,19 @@ interface TierSettings {
 const TIERS: Record<RepoTier, TierSettings> = {
   small: {
     gitHistoryDepth: 250,
-    maxMemoryDiskMB: 5, // floor — small repos keep the full default budget
+    maxMemoryDiskMB: 50, // uniform across tiers — see the note above
     codeMapMaxFiles: 1500,
     coChangeMaxCommits: 5000,
   },
   medium: {
     gitHistoryDepth: 500,
-    maxMemoryDiskMB: 5,
+    maxMemoryDiskMB: 50,
     codeMapMaxFiles: 4000,
     coChangeMaxCommits: 5000,
   },
   large: {
     gitHistoryDepth: 1500,
-    maxMemoryDiskMB: 20,
+    maxMemoryDiskMB: 50,
     codeMapMaxFiles: 10000,
     // co-change is the one genuinely super-linear pass; on very large
     // histories it is skipped rather than risking a stall.
@@ -187,9 +191,11 @@ export function applyAdaptiveTuning(
     changes.push(`gitHistoryDepth=${t.gitHistoryDepth}`)
   }
   if (!config.explicitKeys.has("maxMemoryDiskMB")) {
-    // Adaptation only ever RAISES the budget — never below the 5 MB
-    // default. `Math.max` makes that explicit and future-proof.
-    const mb = Math.max(5, t.maxMemoryDiskMB)
+    // The budget is tier-independent (all tiers carry the 50 MB
+    // default), so this normally makes no change. Adaptation only ever
+    // RAISES the budget, never lowers it — `Math.max` keeps that
+    // invariant if a future tier table sets a larger value.
+    const mb = Math.max(50, t.maxMemoryDiskMB)
     const bytes = mb * 1024 * 1024
     if (config.maxMemoryBytes !== bytes) {
       config.maxMemoryBytes = bytes

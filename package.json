@@ -34,16 +34,26 @@
     "lint": "eslint src tests",
     "clean": "rm -rf dist coverage",
     "prepublishOnly": "bun run clean && bun run build",
-    "test": "bun tests/store.test.ts && bun tests/search.test.ts && bun tests/ingest.test.ts && bun tests/mining.test.ts && bun tests/sessions.test.ts && bun tests/code-health.test.ts && bun tests/code-map.test.ts && bun tests/session-snapshot.test.ts && bun tests/adaptive.test.ts && bun tests/file-log.test.ts && bun tests/token-savings.test.ts && bun tests/skill-activation.test.ts && bun tests/scaling.test.ts && bun tests/plugin.test.ts",
+    "test": "bun tests/store.test.ts && bun tests/search.test.ts && bun tests/ingest.test.ts && bun tests/mining.test.ts && bun tests/sessions.test.ts && bun tests/code-health.test.ts && bun tests/code-map.test.ts && bun tests/session-snapshot.test.ts && bun tests/adaptive.test.ts && bun tests/file-log.test.ts && bun tests/token-savings.test.ts && bun tests/skill-activation.test.ts && bun tests/scaling.test.ts && bun tests/semantic.test.ts && bun tests/ppr.test.ts && bun tests/plugin.test.ts",
     "smoke": "bun scripts/smoke.mjs",
     "check:size": "bun scripts/check-size.mjs",
     "test:coverage": "bun test --coverage",
     "coverage:check": "bun scripts/coverage-check.mjs",
+    "verify:semantic": "bun scripts/verify-semantic.mjs",
+    "test:analyzer": "python3 tests/test_analyze_logs.py",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@opencode-ai/plugin": ">=1.14.0",
     "web-tree-sitter": "0.25.10"
+  },
+  "peerDependencies": {
+    "@huggingface/transformers": "^3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@huggingface/transformers": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",

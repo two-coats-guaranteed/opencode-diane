@@ -30,6 +30,10 @@ import { ingestCodeHealth } from "./ingest/code-health.js"
 import { ingestCodeMap, ingestCodeMapForFile } from "./ingest/code-map.js"
 import { writeSnapshot, latestSnapshot, snapshotSummary } from "./ingest/session-snapshot.js"
 import { measureRepo, applyAdaptiveTuning } from "./ingest/adaptive.js"
+import { createE5Embedder } from "./search/e5-embedder.js"
+import { DEFAULT_EMBEDDING_MODEL, type Embedder } from "./search/embedder.js"
+import { VectorStore } from "./store/vector-store.js"
+import { embedMissingMemories } from "./search/embed-pass.js"
 import { isGitRepo } from "./utils/shell.js"
 import { isAbsolute, join } from "node:path"
 import { createFileLogger, truncateForLog } from "./utils/file-log.js"
@@ -220,16 +224,55 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
   }
 
   // ── 3. Background pre-fill on first run / new commits ─────────────
-  if (config.autoIngestOnStartup) {
-    void prefillInBackground(
-      repo,
-      root,
-      client,
-      config,
-      log,
-      event,
-      (ctx as unknown as { sessionID?: string }).sessionID
-    )
+  const prefillDone: Promise<unknown> = config.autoIngestOnStartup
+    ? prefillInBackground(
+        repo,
+        root,
+        client,
+        config,
+        log,
+        event,
+        (ctx as unknown as { sessionID?: string }).sessionID
+      )
+    : Promise.resolve()
+  // Fire-and-forget for the main path; prefill handles its own errors.
+  void prefillDone
+
+  // ── 3b. Optional cross-lingual semantic search (opt-in) ───────────
+  // Disabled by default — when off, nothing below runs, no model is
+  // downloaded, `@huggingface/transformers` is never imported, and
+  // recall is the unchanged pure-lexical path. When on, the model
+  // loads in the background; recalls before it is ready simply use
+  // lexical search. A failure here (missing optional dependency,
+  // blocked download) degrades to lexical search — it never breaks
+  // the plugin.
+  let embedder: Embedder | undefined
+  if (config.enableSemanticSearch) {
+    void initSemanticSearch(prefillDone)
+  }
+  async function initSemanticSearch(prefill: Promise<unknown>): Promise<void> {
+    try {
+      const e = await createE5Embedder(config.embeddingModel)
+      const vs = VectorStore.open(root, e.id)
+      repo.attachVectorStore(vs)
+      embedder = e // from now on recalls fuse vector similarity with BM25
+      log("info", `semantic: model ${e.id} ready (${vs.size()} cached vectors)`)
+      event("semantic.ready", { model: e.id, cachedVectors: vs.size() })
+      await prefill // every memory must exist before the embedding pass
+      const { embedded, pruned } = await embedMissingMemories(repo, vs, e, (m) =>
+        log("info", m)
+      )
+      log(
+        "info",
+        `semantic: embedding pass done — ${embedded} embedded, ${pruned} pruned, ` +
+          `${vs.size()} vectors total`
+      )
+      event("semantic.embedded", { embedded, pruned, total: vs.size() })
+    } catch (err) {
+      const m = err instanceof Error ? err.message : String(err)
+      log("warn", `semantic search unavailable — ${m}; using lexical search only`)
+      event("semantic.unavailable", { reason: m })
+    }
   }
 
   log(
@@ -243,6 +286,7 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
     autoIngestOnStartup: config.autoIngestOnStartup,
     enableCodeMap: config.enableCodeMap,
     ingestSessions: config.ingestSessions,
+    enableSemanticSearch: config.enableSemanticSearch,
   })
 
   // ── 4. Tools ───────────────────────────────────────────────────────
@@ -307,6 +351,23 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
                 : undefined
             const formatHit = (h: { memory: { category: string; subject: string; content: string }; score: number }): string =>
               `[${h.memory.category} | ${h.memory.subject} | score ${h.score.toFixed(2)}] ${h.memory.content}`
+            // When semantic search is on and the model is ready, embed
+            // the query so recall can fuse vector similarity with BM25.
+            // The embedding is done here, in the async tool handler, so
+            // the recall path itself stays synchronous. A failure falls
+            // back to lexical-only — it never fails the recall.
+            let queryVector: Float32Array | undefined
+            if (embedder) {
+              try {
+                queryVector = await embedder.embedQuery(args.query)
+              } catch (e) {
+                log(
+                  "debug",
+                  `semantic: query embed failed, using lexical only — ` +
+                    `${e instanceof Error ? e.message : String(e)}`
+                )
+              }
+            }
             const { hits, omitted } = repo.recallDetailed(
               {
                 query: args.query,
@@ -315,6 +376,8 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
                 prefer,
                 limit: args.limit ?? 25,
                 tokenBudget: args.tokenBudget ?? 1200,
+                queryVector,
+                personalizedPageRank: config.personalizedPageRank,
               },
               formatHit
             )
@@ -322,6 +385,7 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
             summary.omitted = omitted
             summary.category = cat ?? null
             summary.prefer = prefer ?? null
+            summary.semantic = queryVector !== undefined
             summary.hadSubject = args.subject !== undefined
             summary.tokenBudget = args.tokenBudget ?? 1200
             if (hits.length === 0) return "(no memories matched)"
@@ -1093,6 +1157,9 @@ function coerceUserConfig(options: unknown): UserConfig {
   bool("enableCodeMap")
   bool("enableNudgeHook")
   bool("adaptive")
+  bool("enableSemanticSearch")
+  str("embeddingModel")
+  bool("personalizedPageRank")
   return cfg
 }
 
@@ -1103,7 +1170,7 @@ function resolveConfig(user: UserConfig): ResolvedConfig {
     (Object.keys(user) as Array<keyof UserConfig>).filter((k) => user[k] !== undefined)
   )
   return {
-    maxMemoryBytes: Math.max(1, user.maxMemoryDiskMB ?? 5) * 1024 * 1024,
+    maxMemoryBytes: Math.max(1, user.maxMemoryDiskMB ?? 50) * 1024 * 1024,
     autoIngestOnStartup: user.autoIngestOnStartup ?? true,
     gitHistoryDepth: Math.max(10, user.gitHistoryDepth ?? 500),
     forceActive: user.forceActive ?? false,
@@ -1113,6 +1180,9 @@ function resolveConfig(user: UserConfig): ResolvedConfig {
     enableCodeMap: user.enableCodeMap ?? false,
     enableNudgeHook: user.enableNudgeHook ?? true,
     adaptive: user.adaptive ?? true,
+    enableSemanticSearch: user.enableSemanticSearch ?? false,
+    embeddingModel: user.embeddingModel ?? DEFAULT_EMBEDDING_MODEL,
+    personalizedPageRank: user.personalizedPageRank ?? false,
     explicitKeys,
     // Size-derived knobs — these are the fixed (medium-tier) defaults;
     // applyAdaptiveTuning overwrites them from the measured repo
