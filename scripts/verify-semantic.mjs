@@ -1,9 +1,17 @@
 #!/usr/bin/env bun
 /**
  * verify-semantic.mjs — verify the REAL multilingual-e5 model does
- * cross-lingual retrieval, across NINE languages on each side of every
- * query: English, Chinese, Russian, Japanese, Spanish, Turkish,
+ * cross-lingual retrieval, across SIXTEEN languages on each side of
+ * every query: English, Chinese, Russian, Japanese, Spanish, Turkish,
+ * Korean, Finnish, Norwegian, Hindi, Arabic, Persian (Farsi), Swedish,
  * Mongolian (Cyrillic), Tajik (Cyrillic), and Kyrgyz (Cyrillic).
+ *
+ * Each language appears as BOTH a passage (code comment, so other
+ * languages can retrieve it) and as a query (so it can retrieve other
+ * languages' passages). The query graph forms a cycle that touches
+ * every language in both directions; a passing run proves the
+ * embedding space is genuinely shared, not just "English↔X" for each
+ * individual X.
  *
  * The `semantic.test.ts` suite proves diane's pipeline (vector store,
  * RRF fusion, recall) is correct using a deterministic stub embedder
@@ -15,9 +23,11 @@
  * different amounts of data per language:
  *
  *   - CORE tier — English, Chinese, Russian, Japanese, Spanish,
- *     Turkish. These are well-represented in the model's training
- *     data; cross-lingual retrieval here is expected to work. The
- *     exit code reflects this tier: a core-tier miss fails the script.
+ *     Turkish, Korean, Finnish, Norwegian, Hindi, Arabic, Persian,
+ *     Swedish. All well-represented in the model's training data
+ *     (XLM-RoBERTa, 100 languages); cross-lingual retrieval here is
+ *     expected to work. The exit code reflects this tier: a core-tier
+ *     miss fails the script.
  *
  *   - EXPERIMENTAL tier — Mongolian, Tajik, Kyrgyz. Low-resource
  *     Cyrillic languages whose coverage in multilingual-e5-small is
@@ -71,11 +81,10 @@ function cosine(a, b) {
   return d
 }
 
-// Nine code comments, each in a different language, each a distinct
-// concept (auth ≠ cache ≠ config ≠ websocket ≠ error-handling ≠
-// upload-validation ≠ logging ≠ input-validation ≠ retry). Distinct
-// topics so a correct cross-lingual match cannot be explained by
-// topical bleed between two languages of the same script.
+// Sixteen code comments, each in a different language, each a distinct
+// concept. Topics must be mutually exclusive: a correct cross-lingual
+// match should reflect topical alignment in the shared embedding
+// space, not topical bleed between two languages on similar themes.
 const passages = [
   { id: "EN auth",      text: "passage: // Validate the user credentials and open an authenticated session." },
   { id: "ZH database",  text: "passage: // 数据库查询结果的缓存层，减少重复查询开销。" },
@@ -83,6 +92,13 @@ const passages = [
   { id: "JA websocket", text: "passage: // WebSocket メッセージを処理し、クライアントへ転送するハンドラ。" },
   { id: "ES error",     text: "passage: // Captura las excepciones lanzadas por el cliente HTTP y las registra." },
   { id: "TR upload",    text: "passage: // Yüklenen dosyaların boyutunu kontrol eden doğrulayıcı." },
+  { id: "KO ratelimit", text: "passage: // 슬라이딩 윈도우 알고리즘을 사용하는 요청 속도 제한 미들웨어." },
+  { id: "FI pagination",text: "passage: // Tietokantakyselyiden sivutus sivukoko- ja siirtymäparametreilla." },
+  { id: "NO email",     text: "passage: // Sender e-postvarsler asynkront gjennom SMTP-køen." },
+  { id: "HI pdf",       text: "passage: // उपयोगकर्ता डेटा से पीडीएफ रिपोर्ट उत्पन्न करता है।" },
+  { id: "AR thumbnail", text: "passage: // إنشاء صور مصغّرة من الصور المرفوعة بأبعاد متعددة." },
+  { id: "FA timezone",  text: "passage: // تبدیل زمان میان مناطق زمانی مختلف کاربر." },
+  { id: "SV queue",     text: "passage: // Bakgrundsarbetare som hanterar jobb från meddelandekön." },
   { id: "MN logging",   text: "passage: // Хэрэглэгчийн үйлдлийг бүртгэх лог систем." },
   { id: "TG validation",text: "passage: // Тафтиши маълумоти воридшаванда барои бехатарӣ." },
   { id: "KY retry",     text: "passage: // Кайра аракет кылуу логикасы экспоненциалдуу күтүү менен." },
@@ -99,6 +115,18 @@ const queries = [
   { tier: "core",         lang: "ES→JA", q: "query: manejador de mensajes websocket",        expect: "JA websocket" },
   { tier: "core",         lang: "JA→ES", q: "query: HTTP例外のキャプチャ",                    expect: "ES error" },
   { tier: "core",         lang: "EN→TR", q: "query: uploaded file size validator",           expect: "TR upload" },
+
+  // Core tier — added languages, in a cycle KO→FI→NO→HI→AR→FA→SV→KO
+  // so each appears once as the query SOURCE and once as the TARGET.
+  // Together with the original six rows above, every one of the 16
+  // languages is exercised in both directions.
+  { tier: "core",         lang: "KO→FI", q: "query: 데이터베이스 페이지네이션 로직",            expect: "FI pagination" },
+  { tier: "core",         lang: "FI→NO", q: "query: sähköpostien lähettäminen SMTP:n kautta", expect: "NO email" },
+  { tier: "core",         lang: "NO→HI", q: "query: generere PDF-rapport fra brukerdata",     expect: "HI pdf" },
+  { tier: "core",         lang: "HI→AR", q: "query: छवियों से थंबनेल बनाना",                  expect: "AR thumbnail" },
+  { tier: "core",         lang: "AR→FA", q: "query: تحويل المناطق الزمنية بين المستخدمين",     expect: "FA timezone" },
+  { tier: "core",         lang: "FA→SV", q: "query: کارگر پس‌زمینه برای صف پیام",             expect: "SV queue" },
+  { tier: "core",         lang: "SV→KO", q: "query: hastighetsbegränsning för förfrågningar", expect: "KO ratelimit" },
   // Experimental tier — low-resource Cyrillic languages. Reported,
   // but the exit code does not depend on them.
   { tier: "experimental", lang: "TR→MN", q: "query: kullanıcı eylem günlüğü",                expect: "MN logging" },

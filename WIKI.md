@@ -11,12 +11,12 @@ round-trips, no convention assumptions — by default. (Cross-lingual
 semantic search is available as an explicit opt-in; see *Semantic
 search*.)
 
-The name is a *Twin Peaks* reference. In the show, Agent Cooper
-dictated all his observations to an unseen assistant named Diane.
-Here, the AI agent dictates to a persistent memory layer that holds
-everything it has observed about the codebase. "Diane, I'm standing
-at the edge of a large repository, and I have some thoughts on the
-commit history."
+The name is a *Twin Peaks* reference. Throughout the show, Dale
+Cooper recorded his case notes for Diane, the recipient of his
+investigation log. The plugin plays that role for a coding agent — a
+persistent memory layer that holds everything it has observed about
+the codebase. "Diane, I'm standing at the edge of a large
+repository, and I have some thoughts on the commit history."
 
 ## Why it exists
 

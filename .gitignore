@@ -4,6 +4,10 @@ coverage/
 *.log
 .DS_Store
 
+# IDE / editor configs — user-specific, never committed
+.idea/
+.vscode/
+
 # SQLite store written by the plugin when run on its own repo
 # (and the WAL/SHM sidecars SQLite manages alongside it)
 *.db
@@ -15,4 +19,3 @@ coverage/
 .measure-tmp-store/
 .dump-code-map-tmp/
 .aider*
-.idea

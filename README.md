@@ -1,12 +1,17 @@
 # opencode-diane
 
+[![npm](https://img.shields.io/npm/v/opencode-diane.svg)](https://www.npmjs.com/package/opencode-diane)
+[![CI](https://github.com/two-coats-guaranteed/opencode-diane/actions/workflows/ci.yml/badge.svg)](https://github.com/two-coats-guaranteed/opencode-diane/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+
 A memory layer for [OpenCode](https://opencode.ai). It gives the
 coding agent a persistent, searchable store of structural facts about
 a repository, so it stops re-discovering the same things — with raw
 `git log`, `grep`, and file reads — every single session.
 
-Named for Agent Cooper's unseen assistant in *Twin Peaks*: the agent
-dictates what it learns about the codebase; Diane keeps it.
+Named for Diane in *Twin Peaks* — the recipient of Dale Cooper's
+recorded case notes. The plugin works the same way: it keeps the
+record of what your coding agent learns about a codebase.
 
 ## TL;DR for a decision-maker
 

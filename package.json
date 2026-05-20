@@ -1,6 +1,6 @@
 {
   "name": "opencode-diane",
-  "version": "0.0.4",
+  "version": "0.0.3",
   "description": "OpenCode plugin: hierarchical, token-efficient memory for any git repository. Convention-free — pre-fills from git diff-structure and project files, no embeddings, no LLM, no commit-message parsing. Includes skill mining.",
   "keywords": [
     "opencode",
@@ -13,6 +13,14 @@
     "agents.md"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/two-coats-guaranteed/opencode-diane.git"
+  },
+  "bugs": {
+    "url": "https://github.com/two-coats-guaranteed/opencode-diane/issues"
+  },
+  "homepage": "https://github.com/two-coats-guaranteed/opencode-diane#readme",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -49,7 +57,7 @@
     "web-tree-sitter": "0.25.10"
   },
   "peerDependencies": {
-    "@huggingface/transformers": "^3.0.0"
+    "@huggingface/transformers": "^4.2.0"
   },
   "peerDependenciesMeta": {
     "@huggingface/transformers": {
