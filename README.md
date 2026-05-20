@@ -67,37 +67,6 @@ decision-maker*.
 | `memory_mine_skills` | Cluster memories by subject into `SKILL.md` files. Runs in the background. |
 | `memory_skill` | List the mined skill files, or load one into the conversation — so a skill mined this session is usable now, no restart. |
 
-## Install
-
-```bash
-npm install opencode-diane
-```
-
-Then in `opencode.json`:
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-diane"]
-}
-```
-
-Open OpenCode in any git repository, in any language. The plugin
-loads, runs prefill in the background, registers all nine tools, and
-the agent can use them immediately. If the directory is neither a git
-repo nor has a recognised manifest, the plugin logs one idle line and
-does nothing.
-
-The optional Aider-style code map is **off by default** because its
-tree-sitter grammars add ~16 MB to the install. To enable it, use the
-`[name, options]` tuple form and restart OpenCode:
-
-```json
-{
-  "plugin": [["opencode-diane", { "enableCodeMap": true }]]
-}
-```
-
 ### Install from a local clone
 
 ```bash
