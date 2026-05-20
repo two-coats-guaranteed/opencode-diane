@@ -486,6 +486,72 @@ interface UserConfig {
 }
 ```
 
+## Coexisting plugins
+
+Diane is designed to run alongside other OpenCode plugins without
+either side losing functionality. The two compatibility decisions
+that can't be avoided are made automatically at startup, by reading
+the `plugin` array in `opencode.json` (project-local first, then
+`~/.config/opencode/opencode.json`) and matching against known peer
+names.
+
+### What gets adjusted, and why
+
+**The `tool.execute.after` nudge hook (default ON).** When a memory
+tool has gone unused after several discovery calls, Diane appends one
+short reminder to the discovery tool's output. `oh-my-opencode` also
+post-processes tool output (its `look_at` flow replaces grep/glob),
+and two plugins both mutating `output.output` interleave
+unpredictably — so when oh-my-opencode is listed in `opencode.json`
+the nudge is turned off. `caveman` doesn't touch tool output (it
+hooks `session.created` and `tui.prompt.append`), so the nudge stays
+on alongside caveman.
+
+**Mined-skill subdirectory prefix (default empty).**
+`memory_mine_skills` writes to `.opencode/skills/<slug>/SKILL.md` —
+the same directory OpenCode discovers skills from. `caveman` writes
+fixed slugs into the same place (`caveman`, `caveman-commit`,
+`caveman-review`, `caveman-help`, `caveman-compress`), and
+`oh-my-opencode`'s skill system also lives there. When either is
+detected, Diane prefixes its subdirs with `diane-` so collisions are
+impossible AND `memory_skill` surfaces only Diane's slugs (the
+peer's slugs are theirs to list, not ours). Standalone, no prefix is
+applied — paths are byte-for-byte the documented default.
+
+### The matrix
+
+| Detected peer | nudge hook | mined-skill subdirs |
+|---|---|---|
+| none | on (default) | `<slug>/` |
+| `oh-my-opencode` / `oh-my-openagent` / `oh-my-opencode-slim` | **off** | **`diane-<slug>/`** |
+| `caveman` / `caveman-opencode` / `caveman-opencode-plugin` / `opencode-caveman` | on | **`diane-<slug>/`** |
+| both | **off** | **`diane-<slug>/`** |
+
+### Override
+
+An explicit `enableNudgeHook` or `skillsOutputDir` in your `"diane"`
+config beats the auto-detect — useful when you have a specific reason
+to want the nudge on alongside oh-my-opencode, or to point mining at
+a non-standard directory and accept your own collision policy. The
+adjustments are also visible at runtime:
+
+- The OpenCode log line at startup names the peers found and the
+  adjustments made (or "no compatibility adjustments needed" when
+  none were).
+- The `plugin.active` event in the JSONL log carries
+  `peers: { ohMyOpencode, caveman, found: [...] }` plus the
+  resolved `enableNudgeHook` and `minedSkillPrefix`, so a support
+  thread can confirm what actually ran.
+
+### What's not detected
+
+Detection is **list-based, not behavioural**. A plugin that does the
+same things oh-my-opencode does but isn't named anything we recognise
+will get no special treatment from us. If you hit a clash with such a
+plugin, set `enableNudgeHook: false` (and/or `skillsOutputDir`) in
+your config and file an issue with the peer's name so we can add it
+to the detection list.
+
 ## Adaptive sizing
 
 The fixed defaults (gitHistoryDepth 500, a 4000-file code-map cap) are

@@ -159,6 +159,17 @@ export interface ResolvedConfig {
   gitHistoryDepth: number
   forceActive: boolean
   skillsOutputDir: string
+  /**
+   * Prefix applied to mined skill subdirectory names AND to the
+   * subjects of the memories that point at them. Default `""` — the
+   * standalone behaviour, paths unchanged. Set to `"diane-"` at
+   * startup when a coexisting plugin (caveman, oh-my-opencode) writes
+   * into the same `.opencode/skills/` directory; this namespaces our
+   * subdirs so they don't collide with the peer's slugs (`caveman`,
+   * `caveman-commit`, …) and ensures `memory_skill` surfaces only
+   * ours, not the peer's.
+   */
+  minedSkillPrefix: string
   skillMiningMinCluster: number
   ingestSessions: boolean
   enableCodeMap: boolean

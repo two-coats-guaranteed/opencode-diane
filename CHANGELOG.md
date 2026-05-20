@@ -36,6 +36,15 @@ First public preview release.
   failed legacy migration logs cleanly and the plugin continues with
   an empty database rather than failing to start. Regression test in
   `tests/store.test.ts`.
+- Auto-detects coexisting plugins (`oh-my-opencode`/`oh-my-openagent`/
+  `oh-my-opencode-slim`, and any `caveman` packaging) by reading the
+  `plugin` array in `opencode.json`. When a peer is present and the
+  user hasn't overridden the relevant option, disables the
+  tool-output nudge hook (oh-my-opencode also rewrites tool output)
+  and prefixes mined-skill subdirectories with `diane-` (so skills
+  in the shared `.opencode/skills/` directory don't collide with the
+  peer's slugs). Standalone behaviour is unchanged. Tests in
+  `tests/peer-compat.test.ts`.
 
 ### Coverage
 - 460+ assertions across 16 suites; 91%+ line coverage; size ceiling

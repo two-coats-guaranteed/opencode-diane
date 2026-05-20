@@ -46,10 +46,17 @@ export interface MinedSkillInfo {
  * Tolerant by construction: a missing directory yields an empty list,
  * and an unreadable or frontmatter-less skill folder is skipped
  * rather than throwing. Never throws.
+ *
+ * `slugPrefix`, if non-empty, filters the results to subdirectories
+ * whose name starts with the prefix — used when a coexisting plugin
+ * (caveman, oh-my-opencode) writes its own skills into the shared
+ * `.opencode/skills/` directory and we want to surface only ours.
+ * Default `""` returns everything, matching the standalone behaviour.
  */
 export async function readMinedSkills(
   root: string,
-  skillsOutputDir: string
+  skillsOutputDir: string,
+  slugPrefix: string = "",
 ): Promise<MinedSkillInfo[]> {
   const base = join(root, skillsOutputDir)
   let entries: string[]
@@ -57,6 +64,13 @@ export async function readMinedSkills(
     entries = await readdir(base)
   } catch {
     return [] // no skills directory yet — nothing mined
+  }
+
+  // When a prefix is configured we only surface subdirectories matching
+  // it — peer plugins' subdirs (e.g. caveman's `caveman-commit/`) are
+  // theirs to list, not ours.
+  if (slugPrefix.length > 0) {
+    entries = entries.filter((e) => e.startsWith(slugPrefix))
   }
 
   const out: MinedSkillInfo[] = []
@@ -129,7 +143,8 @@ export async function mineSkills(
   repo: MemoryRepository,
   root: string,
   skillsOutputDir: string,
-  minCluster: number
+  minCluster: number,
+  slugPrefix: string = "",
 ): Promise<MineResult> {
   const all = repo.allMemories()
 
@@ -159,7 +174,14 @@ export async function mineSkills(
     if (skillsWritten >= MAX_SKILLS_PER_RUN) break
     const skill = buildSkill(subject, members)
     if (!skill) continue
-    const dir = join(outputBase, skill.slug)
+    // Prefix the on-disk subdirectory name AND the memory-store subject
+    // so peer plugins (caveman, oh-my-opencode) writing into the shared
+    // `.opencode/skills/` directory don't collide with us, and the
+    // subsequent `readMinedSkills(prefix)` round-trip finds the same
+    // entries. Empty prefix is the standalone behaviour and the path
+    // is byte-for-byte unchanged.
+    const namespacedSlug = `${slugPrefix}${skill.slug}`
+    const dir = join(outputBase, namespacedSlug)
     await mkdir(dir, { recursive: true })
     const path = join(dir, "SKILL.md")
     await writeFile(path, skill.content, "utf-8")
@@ -167,7 +189,7 @@ export async function mineSkills(
     // re-emit the same one and the agent can find it via recall.
     repo.insertIfMissing({
       category: "skill-mined",
-      subject: skill.slug,
+      subject: namespacedSlug,
       content:
         `Mined skill "${skill.name}" (description: ${skill.description}). ` +
         `Backed by ${members.length} memories on subject "${subject}". ` +

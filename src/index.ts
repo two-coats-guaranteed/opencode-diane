@@ -39,6 +39,7 @@ import { VectorStore } from "./store/vector-store.js"
 import { embedMissingMemories } from "./search/embed-pass.js"
 import { isGitRepo } from "./utils/shell.js"
 import { createFileLogger, truncateForLog } from "./utils/file-log.js"
+import { detectPeerPlugins } from "./utils/peer-detection.js"
 import { mineSkills, readMinedSkills } from "./mining/skill-miner.js"
 import type { Category, ResolvedConfig, UserConfig } from "./types.js"
 
@@ -87,6 +88,30 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
   // tuple in opencode.json: ["opencode-diane", { ...options }].
   // Coerce defensively — it's untrusted JSON, junk keys are ignored.
   const config = resolveConfig(coerceUserConfig(options))
+
+  // ── Peer-plugin compatibility (auto-detected, opt-out) ─────────────
+  // Read the user's opencode.json(s) and see which known coexisting
+  // plugins are listed alongside us. Two compatibility decisions get
+  // made here when peers are present AND the user didn't override:
+  //
+  //   - oh-my-opencode also rewrites tool output; two plugins both
+  //     mutating `output.output` interleave unpredictably. Disable
+  //     our nudge hook in its presence.
+  //   - caveman writes skills into the shared `.opencode/skills/`
+  //     directory under fixed slugs (`caveman`, `caveman-commit`, …).
+  //     Namespace our mined-skill subdirs with `diane-` so they don't
+  //     collide, and so `memory_skill` surfaces only our skills, not
+  //     the peer's.
+  //
+  // Standalone — no peer listed — `peers` is all-false and behaviour
+  // is byte-for-byte the documented default.
+  const peers = detectPeerPlugins(root)
+  if (peers.ohMyOpencode && !config.explicitKeys.has("enableNudgeHook")) {
+    config.enableNudgeHook = false
+  }
+  if ((peers.ohMyOpencode || peers.caveman) && !config.explicitKeys.has("skillsOutputDir")) {
+    config.minedSkillPrefix = "diane-"
+  }
 
   // Rich on-disk log. Two sinks: OpenCode's session log channel (the
   // existing `client.app.log` call below — for the user/agent in the
@@ -325,6 +350,22 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
     "info",
     `active: store has ${repo.size()} memories, ${humanBytes(repo.totalBytes())} on disk, budget ${humanBytes(config.maxMemoryBytes)}.`
   )
+  // If we adapted to a coexisting plugin, say so once and name what
+  // we changed. Silent in the standalone case (peers.found is empty).
+  if (peers.found.length > 0) {
+    const adjusted: string[] = []
+    if (peers.ohMyOpencode && !config.explicitKeys.has("enableNudgeHook")) {
+      adjusted.push("nudge hook disabled (oh-my-opencode also rewrites tool output)")
+    }
+    if ((peers.ohMyOpencode || peers.caveman) && !config.explicitKeys.has("skillsOutputDir")) {
+      adjusted.push("mined skills prefixed with 'diane-' to namespace them under .opencode/skills/")
+    }
+    log(
+      "info",
+      `coexisting plugin(s) detected (${peers.found.join(", ")})` +
+        (adjusted.length > 0 ? ` — ${adjusted.join("; ")}` : " — no compatibility adjustments needed"),
+    )
+  }
   event("plugin.active", {
     version: PLUGIN_VERSION,
     storeSize: repo.size(),
@@ -334,6 +375,13 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
     enableCodeMap: config.enableCodeMap,
     ingestSessions: config.ingestSessions,
     enableSemanticSearch: config.enableSemanticSearch,
+    peers: {
+      ohMyOpencode: peers.ohMyOpencode,
+      caveman: peers.caveman,
+      found: peers.found,
+    },
+    enableNudgeHook: config.enableNudgeHook,
+    minedSkillPrefix: config.minedSkillPrefix,
   })
 
   // ── 4. Tools ───────────────────────────────────────────────────────
@@ -761,7 +809,8 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
                   repo,
                   root,
                   config.skillsOutputDir,
-                  config.skillMiningMinCluster
+                  config.skillMiningMinCluster,
+                  config.minedSkillPrefix,
                 )
                 await repo.forceFlush()
                 const names =
@@ -782,7 +831,7 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
                 // so without this the skills would sit unused until the
                 // next launch.
                 if (res.skillsWritten > 0) {
-                  const mined = await readMinedSkills(root, config.skillsOutputDir)
+                  const mined = await readMinedSkills(root, config.skillsOutputDir, config.minedSkillPrefix)
                   const justMined = mined.filter((s) =>
                     res.writtenPaths.some((p) => p.includes(`/${s.slug}/`))
                   )
@@ -868,7 +917,7 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
           try {
             // Always read fresh from disk — that's what makes a skill
             // mined mid-session visible here without a restart.
-            const skills = await readMinedSkills(root, config.skillsOutputDir)
+            const skills = await readMinedSkills(root, config.skillsOutputDir, config.minedSkillPrefix)
 
             // ── LIST mode ────────────────────────────────────────────
             if (!args.name || !args.name.trim()) {
@@ -1224,6 +1273,7 @@ function resolveConfig(user: UserConfig): ResolvedConfig {
     gitHistoryDepth: Math.max(10, user.gitHistoryDepth ?? 500),
     forceActive: user.forceActive ?? false,
     skillsOutputDir: user.skillsOutputDir ?? ".opencode/skills",
+    minedSkillPrefix: "",
     skillMiningMinCluster: Math.max(2, user.skillMiningMinCluster ?? 3),
     ingestSessions: user.ingestSessions ?? true,
     enableCodeMap: user.enableCodeMap ?? false,
