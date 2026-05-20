@@ -128,9 +128,19 @@ export class MemoryRepository {
    * Open the store for a project root and build the repository.
    * Stays async to preserve the historical API even though
    * `bun:sqlite` is synchronous — callers `await` this.
+   *
+   * If the legacy JSON-to-SQLite migration fails (rare, but possible
+   * when another process is touching the database during startup),
+   * `onMigrationError` is invoked with the cause and the plugin
+   * continues with an empty fresh database — see SqliteStore.open
+   * and migrateFromJson for why "keep starting, log loudly" beats
+   * "fail to start".
    */
-  static async load(root: string): Promise<MemoryRepository> {
-    const { store, loaded } = SqliteStore.open(root)
+  static async load(
+    root: string,
+    onMigrationError?: (e: unknown) => void,
+  ): Promise<MemoryRepository> {
+    const { store, loaded } = SqliteStore.open(root, undefined, onMigrationError)
     return new MemoryRepository(root, store, loaded)
   }
 

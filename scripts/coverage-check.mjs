@@ -11,18 +11,29 @@
  * reports accurate coverage — this script parses that report and
  * enforces the floor, the role the old c8 `--check-coverage` had.
  *
- * On any failure this script prints the FULL captured output of the
- * `bun test --coverage` run. A suite failure is reported by the suite
- * itself (its own `✗` lines and error are in that output); a missing
- * coverage table likewise only makes sense with the raw output in
- * front of you. Hiding it behind a generic "a suite failed" — as an
- * earlier version of this script did — leaves the user with nothing
- * to act on. The captured output is the diagnosis; show it.
+ * Defensive parsing — every previous CI break here was caused by the
+ * captured-output shape, not by real coverage falling. Specifically:
+ *   - bun auto-enables ANSI colours when it senses a CI terminal, so
+ *     the "All files" row arrived prefixed by `\x1b[1m…` and a literal
+ *     `startsWith("All files")` matcher quietly returned nothing;
+ *   - bun across versions reorders or renames the table columns, so
+ *     a fixed cell index (`cells[1]`/`cells[2]`) is brittle.
+ * This version strips ANSI before matching, forces NO_COLOR on the
+ * child, finds the table columns by parsing the header rather than
+ * by position, and dumps the raw run to disk on every failure so the
+ * uploaded coverage/ artefact carries the diagnosis.
+ *
+ * On any failure this script also prints the FULL captured output:
+ * a suite failure is reported by the suite itself in that output;
+ * a missing coverage table only makes sense with the raw output in
+ * front of you.
  */
 
 import { spawnSync } from "node:child_process"
-import { existsSync } from "node:fs"
+import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+
+import { parseCoverageTable } from "./lib/coverage-parser.mjs"
 
 // Floors. Bun measures a little differently than c8 did; these sit a
 // few points below the real current numbers as a regression guard,
@@ -35,12 +46,15 @@ const MIN_FUNCS = 78
 // returning a non-zero exit code on a fresh checkout.
 const REQUIRED_DEPS = ["@opencode-ai/plugin"]
 
+// Hard cap on the coverage run — 10 minutes is generous; anything
+// longer is a hang the CI minute budget can't absorb either.
+const RUN_TIMEOUT_MS = 10 * 60 * 1000
+
+const COVERAGE_DIR = "coverage"
+const RAW_OUTPUT_PATH = join(COVERAGE_DIR, "last-run.txt")
 const RULE = "──────────────────────────────────────────────────────────"
 const indent = (s) =>
-  s
-    .split("\n")
-    .map((l) => "  │ " + l)
-    .join("\n")
+  s.split("\n").map((l) => "  │ " + l).join("\n")
 
 console.log("── coverage gate (bun test --coverage) ───────────────────")
 
@@ -59,28 +73,44 @@ if (missingDeps.length > 0) {
 
 const res = spawnSync("bun", ["test", "--coverage"], {
   encoding: "utf-8",
-  // coverage summary is printed to stderr by bun; capture both streams
   stdio: ["ignore", "pipe", "pipe"],
+  // Force no ANSI from the child — CI runners often satisfy bun's
+  // colour-on heuristic even on a pipe.
+  env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0", CLICOLOR: "0" },
+  timeout: RUN_TIMEOUT_MS,
+  maxBuffer: 32 * 1024 * 1024,
 })
 
-const output = `${res.stdout ?? ""}\n${res.stderr ?? ""}`.trimEnd()
+if (res.error && res.error.code === "ETIMEDOUT") {
+  console.error(`  ✗ \`bun test --coverage\` timed out after ${RUN_TIMEOUT_MS / 60000} minutes`)
+  console.log(RULE)
+  process.exit(1)
+}
+
+const rawOutput = `${res.stdout ?? ""}\n${res.stderr ?? ""}`.trimEnd()
+
+// Always persist the raw run for the uploaded coverage/ artefact, so
+// a CI failure has full diagnostics attached without re-running.
+try {
+  mkdirSync(COVERAGE_DIR, { recursive: true })
+  writeFileSync(RAW_OUTPUT_PATH, rawOutput + "\n")
+} catch {
+  /* best-effort — the run continues either way */
+}
 
 /** Print the whole captured run, clearly fenced, so the user can see it. */
 function dumpOutput() {
   console.error("")
   console.error("  ── full output of `bun test --coverage` ──────────────────")
-  console.error(indent(output || "(no output captured)"))
+  console.error(indent(rawOutput || "(no output captured)"))
   console.error(`  ${RULE}`)
+  console.error(`  (also written to ${RAW_OUTPUT_PATH})`)
 }
 
 // ── a suite hard-failed ─────────────────────────────────────────────
-// `bun test` aborts the run when a suite calls process.exit(1) on an
-// assertion failure, so a non-zero status usually also means no
-// coverage table was produced. The failing suite's own `✗` line and
-// error text are in `output` — show all of it.
 if (res.status !== 0) {
   console.error(`  ✗ \`bun test --coverage\` exited ${res.status} — a suite failed`)
-  const cantFind = output
+  const cantFind = rawOutput
     .split("\n")
     .find((l) => l.includes("Cannot find module") || l.includes("Cannot find package"))
   if (cantFind) {
@@ -93,42 +123,35 @@ if (res.status !== 0) {
   console.error("  For an isolated, clearly-named per-suite view, run:")
   console.error("      bun run test")
   console.error("  which runs each suite in its own process and names the")
-  console.error("  one that fails (bun test interleaves all 14 at once).")
+  console.error("  one that fails (bun test interleaves all 16 at once).")
   console.log(RULE)
   process.exit(1)
 }
 
-// ── run succeeded — locate the coverage table ───────────────────────
-// The summary row looks like:
-//   All files            |   83.86 |   82.44 |
-// columns: <name> | % Funcs | % Lines | <uncovered>
-const row = output.split("\n").find((l) => l.trim().startsWith("All files"))
-if (!row) {
-  console.error("  ✗ the run passed but no 'All files' coverage row was found")
-  console.error("  → this Bun build may format `--coverage` differently;")
-  console.error("    inspect the raw output below and adjust the parser")
+// ── run succeeded — parse the coverage table ────────────────────────
+// All parsing logic lives in scripts/lib/coverage-parser.mjs and is
+// unit-tested by scripts/lib/coverage-parser-tests.mjs against the
+// CI-shape failure modes (ANSI, column reordering, malformed rows).
+const parsed = parseCoverageTable(rawOutput)
+if (!parsed) {
+  console.error("  ✗ run succeeded but no coverage table was found")
+  console.error("  → this bun build may have changed the --coverage output;")
+  console.error("    inspect the raw output below and update the parser at")
+  console.error("    scripts/lib/coverage-parser.mjs (its tests will tell you")
+  console.error("    what assumption broke)")
   dumpOutput()
   console.log(RULE)
   process.exit(1)
 }
 
-const cells = row.split("|").map((c) => c.trim())
-const funcs = parseFloat(cells[1])
-const lines = parseFloat(cells[2])
-
-if (!Number.isFinite(funcs) || !Number.isFinite(lines)) {
-  console.error(`  ✗ could not parse coverage numbers from: ${row.trim()}`)
-  dumpOutput()
-  console.log(RULE)
-  process.exit(1)
-}
+const { funcs, lines: linesPct } = parsed
 
 console.log(`  functions: ${funcs.toFixed(2)}%  (floor ${MIN_FUNCS}%)`)
-console.log(`  lines:     ${lines.toFixed(2)}%  (floor ${MIN_LINES}%)`)
+console.log(`  lines:     ${linesPct.toFixed(2)}%  (floor ${MIN_LINES}%)`)
 
 let failed = false
-if (lines < MIN_LINES) {
-  console.error(`  ✗ line coverage ${lines.toFixed(2)}% is below the ${MIN_LINES}% floor`)
+if (linesPct < MIN_LINES) {
+  console.error(`  ✗ line coverage ${linesPct.toFixed(2)}% is below the ${MIN_LINES}% floor`)
   failed = true
 }
 if (funcs < MIN_FUNCS) {

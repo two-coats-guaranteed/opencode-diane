@@ -1,6 +1,6 @@
 {
   "name": "opencode-diane",
-  "version": "1.0.0",
+  "version": "0.0.4",
   "description": "OpenCode plugin: hierarchical, token-efficient memory for any git repository. Convention-free — pre-fills from git diff-structure and project files, no embeddings, no LLM, no commit-message parsing. Includes skill mining.",
   "keywords": [
     "opencode",
@@ -41,6 +41,7 @@
     "coverage:check": "bun scripts/coverage-check.mjs",
     "verify:semantic": "bun scripts/verify-semantic.mjs",
     "test:analyzer": "python3 tests/test_analyze_logs.py",
+    "test:coverage-parser": "node --test scripts/lib/coverage-parser-tests.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

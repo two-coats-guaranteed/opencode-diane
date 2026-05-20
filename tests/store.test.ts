@@ -382,6 +382,71 @@ async function main(): Promise<void> {
   await reopened.close()
   await rm(migRoot, { recursive: true, force: true })
 
+  // ── legacy migration: failure path must not crash the plugin ───────
+  // The "db migration" failure observed in the field — when running
+  // alongside heavyweight other plugins — manifested as a throw out
+  // of migrateFromJson that killed startup. The fix wraps the bulk
+  // insert; this test pins the behaviour: a migration that fails for
+  // ANY reason returns 0, surfaces the cause via the callback, leaves
+  // the legacy JSON in place for the next attempt, and the caller
+  // continues with an empty fresh database. Failure to start is not
+  // recoverable; an empty database is.
+  console.log("\n── legacy migration: failure resilience ──────────────────")
+  const failRoot = await mkdtemp(join(tmpdir(), "diane-mem-migfail-"))
+  await mkdir(join(failRoot, ".opencode"), { recursive: true })
+  await writeFile(
+    join(failRoot, ".opencode", "diane.json"),
+    JSON.stringify(legacyJson),
+    "utf-8",
+  )
+
+  // Force a flush failure inside the migration. Monkey-patch the
+  // prototype rather than an instance — `SqliteStore` is constructed
+  // inside open(), so we cannot patch its instance before migration
+  // runs. Restore the original after the test so subsequent suites
+  // are unaffected.
+  const SqliteStoreMod = await import("../src/store/sqlite-store.js")
+  const proto = (SqliteStoreMod.SqliteStore as unknown as { prototype: { flush: unknown } }).prototype
+  const originalFlush = proto.flush
+  proto.flush = function (): void {
+    throw new Error("synthetic flush failure — testing the wrap")
+  }
+
+  const migrationErrors: unknown[] = []
+  let openOk = false
+  let openedRepo: MemoryRepository | null = null
+  try {
+    openedRepo = await MemoryRepository.load(failRoot, (e) => migrationErrors.push(e))
+    openOk = true
+  } catch {
+    openOk = false
+  } finally {
+    proto.flush = originalFlush
+  }
+
+  assert(openOk, "MemoryRepository.load does not throw when migration fails")
+  assert(
+    migrationErrors.length === 1,
+    "the migration-failure callback is invoked exactly once",
+  )
+  assert(
+    migrationErrors[0] instanceof Error &&
+      (migrationErrors[0] as Error).message.includes("synthetic flush failure"),
+    "the original cause is passed through to the caller, not swallowed",
+  )
+  assert(openedRepo !== null && openedRepo.size() === 0, "the repository starts empty after a failed migration")
+  assert(
+    existsSync(join(failRoot, ".opencode", "diane.json")),
+    "the legacy JSON file is preserved on failure so the user keeps their data",
+  )
+  assert(
+    !existsSync(join(failRoot, ".opencode", "diane.json.migrated")),
+    "no .migrated rename happens on failure",
+  )
+
+  await openedRepo?.close()
+  await rm(failRoot, { recursive: true, force: true })
+
   // ── large-store flush scaling: where the SQLite migration pays off ─
   // The 4000-entry timings above show SQLite is *not* faster than JSON
   // at small scale — a ~1 MB store is cheap to rewrite wholesale, and

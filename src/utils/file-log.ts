@@ -3,10 +3,12 @@
  * OpenCode's own session log channel — the existing `log()` callback
  * keeps piping human-readable lines into OpenCode's UI, and this
  * module mirrors them (plus structured events) to a JSONL file under
- * `os.tmpdir()/opencode-diane/`. The file is per-session and per-PID, so
- * parallel OpenCode sessions never interleave; each line is a
- * standalone JSON object so the whole file is greppable AND
- * `jq`-able.
+ * `os.tmpdir()/opencode-diane/` by default, or `$OPENCODE_DIANE_LOG_DIR`
+ * if set (use the env var when running inside Docker — point it at a
+ * mounted volume and your logs survive the container). The file is
+ * per-session and per-PID, so parallel OpenCode sessions never
+ * interleave; each line is a standalone JSON object so the whole file
+ * is greppable AND `jq`-able.
  *
  * Why not into OpenCode's log alone:
  *   - OpenCode's log is human-oriented (single-line strings) and is
@@ -64,8 +66,20 @@ export interface CreateFileLoggerOptions {
   base?: Record<string, unknown>
 }
 
-/** Directory the logger writes into. Exported for tests + docs. */
+/**
+ * Directory the logger writes into.
+ *
+ * Honours `OPENCODE_DIANE_LOG_DIR` if set — point it at a mounted
+ * volume when running under Docker (`-e OPENCODE_DIANE_LOG_DIR=/logs
+ * -v $PWD/logs:/logs`) so logs survive the container and can be read
+ * with `analyze-logs.py --dir /logs` from outside. Falls back to
+ * `os.tmpdir()/opencode-diane/` everywhere else; on a fresh host that
+ * is `/tmp/opencode-diane/` on Linux and a per-user temp folder on
+ * macOS / Windows. Exported for tests + docs.
+ */
 export function richLogsDir(): string {
+  const override = process.env.OPENCODE_DIANE_LOG_DIR
+  if (override && override.length > 0) return override
   return join(tmpdir(), "opencode-diane")
 }
 

@@ -57,6 +57,14 @@ jobs:
         # non-specialist. python3 is preinstalled on ubuntu-latest.
         run: python3 tests/test_analyze_logs.py
 
+      - name: Test the coverage-check parser
+        # Pure unit tests for scripts/lib/coverage-parser.mjs against
+        # the bun-output shapes that have broken the coverage gate
+        # before (ANSI in CI, column reordering, malformed rows). Catch
+        # the next regression here on a developer's machine, not on CI
+        # two weeks after the fact. Standalone — node stdlib only.
+        run: node --test scripts/lib/coverage-parser-tests.mjs
+
   # ─── Coverage: runs once, enforces the floor, publishes the report ─
   coverage:
     name: coverage

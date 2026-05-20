@@ -41,9 +41,9 @@ const argv = process.argv.slice(2)
 const repoFlag = argv.indexOf("--repo")
 const repoName = repoFlag >= 0 ? argv[repoFlag + 1] : null
 const positional = argv.filter((a, i) => !a.startsWith("--") && argv[i - 1] !== "--repo")
-const [aiderFile, tacitFile] = positional
+const [aiderFile, dianeFile] = positional
 
-if (!aiderFile || !tacitFile) {
+if (!aiderFile || !dianeFile) {
   console.error("usage: bun scripts/compare-aider.mjs <aider-map-file> <diane-map-file> [--repo NAME]")
   process.exit(1)
 }
@@ -74,7 +74,7 @@ function readOrEmpty(path) {
 }
 
 const aider = readOrEmpty(aiderFile)
-const tacit = readOrEmpty(tacitFile)
+const diane = readOrEmpty(dianeFile)
 
 /* ─── metrics ───────────────────────────────────────────────────────── */
 
@@ -113,7 +113,7 @@ function analyse(name, src) {
 }
 
 const A = analyse("aider --show-repo-map", aider)
-const T = analyse("diane code map (full dump)", tacit)
+const T = analyse("diane code map (full dump)", diane)
 
 /* ─── report ────────────────────────────────────────────────────────── */
 
@@ -122,18 +122,18 @@ out.push("## aider repo-map vs diane code-map\n")
 if (repoName) out.push(`**Repository:** \`${repoName}\`\n`)
 out.push(`**Token counting:** ${tokenMethod}\n`)
 out.push(
-  `**Inputs:** \`${basename(aiderFile)}\` (aider) · \`${basename(tacitFile)}\` (diane)\n`
+  `**Inputs:** \`${basename(aiderFile)}\` (aider) · \`${basename(dianeFile)}\` (diane)\n`
 )
 out.push("")
 
 if (A.missing || T.missing) {
   out.push("> ⚠️ One or both map files were missing or empty:")
   if (A.missing) out.push(`> - aider map \`${aiderFile}\` — missing/empty${A.error ? ` (${A.error})` : ""}`)
-  if (T.missing) out.push(`> - tacit map \`${tacitFile}\` — missing/empty${T.error ? ` (${T.error})` : ""}`)
+  if (T.missing) out.push(`> - diane map \`${dianeFile}\` — missing/empty${T.error ? ` (${T.error})` : ""}`)
   out.push("")
   out.push(
     "> If the aider side is empty, aider likely couldn't start (it needs " +
-      "a model configured even for `--show-repo-map`). If the tacit side " +
+      "a model configured even for `--show-repo-map`). If the diane side " +
       "is empty, the code-map ingester reported no parseable files."
   )
   out.push("")

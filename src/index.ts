@@ -21,6 +21,9 @@
 
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
+import { readFileSync } from "node:fs"
+import { dirname, isAbsolute, join } from "node:path"
+import { fileURLToPath } from "node:url"
 
 import { MemoryRepository } from "./store/repository.js"
 import { ingestGitHistory } from "./ingest/git.js"
@@ -35,12 +38,37 @@ import { DEFAULT_EMBEDDING_MODEL, type Embedder } from "./search/embedder.js"
 import { VectorStore } from "./store/vector-store.js"
 import { embedMissingMemories } from "./search/embed-pass.js"
 import { isGitRepo } from "./utils/shell.js"
-import { isAbsolute, join } from "node:path"
 import { createFileLogger, truncateForLog } from "./utils/file-log.js"
 import { mineSkills, readMinedSkills } from "./mining/skill-miner.js"
 import type { Category, ResolvedConfig, UserConfig } from "./types.js"
 
 const SERVICE = "opencode-diane"
+
+/**
+ * Plugin version, read at startup from this package's own package.json.
+ *
+ * `package.json#version` is the **single source of truth** for the
+ * release version — change it there and it propagates everywhere this
+ * constant is used (the `plugin.active` startup event, the
+ * `memory_status` tool's output, and any downstream tooling that
+ * reads the logs). There is no second place to update, by design.
+ *
+ * The read is relative to this module's location, which resolves to
+ * the package root in BOTH dev (`src/index.ts` → `src/../package.json`)
+ * and after install (`dist/index.js` → `dist/../package.json`), so it
+ * works identically in both. If the file is unreachable for any
+ * reason the constant degrades to `"unknown"` rather than crashing —
+ * a missing version label is a worse outcome than a missing plugin.
+ */
+const PLUGIN_VERSION: string = ((): string => {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const text = readFileSync(join(here, "..", "package.json"), "utf-8")
+    return (JSON.parse(text) as { version?: string }).version ?? "unknown"
+  } catch {
+    return "unknown"
+  }
+})()
 
 export type {
   BackgroundJobHandle,
@@ -150,7 +178,25 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
   log("debug", `rich logs at ${fileLog.path()}`)
 
   // ── 1. Load the store ──────────────────────────────────────────────
-  const repo = await MemoryRepository.load(root)
+  // If the legacy JSON-to-SQLite migration fails (rare — typically
+  // when another plugin is touching the DB during startup, or a Bun
+  // build mismatch interferes with `bun:sqlite`), we DO NOT crash the
+  // plugin: a "db migration" exception during startup was a real
+  // failure mode observed in the field when running alongside other
+  // heavyweight plugins. Instead we emit a structured event so the
+  // cause is in the JSONL log, mirror a clear human-readable line to
+  // OpenCode, and continue with an empty fresh database. The next
+  // startup will retry the migration — losing memories is recoverable;
+  // failing to start is not.
+  const repo = await MemoryRepository.load(root, (e) => {
+    const reason = e instanceof Error ? `${e.name}: ${e.message}` : String(e)
+    fileLog.event("store.migration.failed", { reason })
+    log("warn",
+      `legacy diane.json migration failed (${reason}); ` +
+      `starting with an empty database — your .opencode/diane.json is ` +
+      `untouched and the next startup will retry the migration.`,
+    )
+  })
 
   // ── Nudge state (session-scoped via this closure) ─────────────────
   // "Kinda enforce" the recall-first workflow: if the agent does
@@ -280,6 +326,7 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
     `active: store has ${repo.size()} memories, ${humanBytes(repo.totalBytes())} on disk, budget ${humanBytes(config.maxMemoryBytes)}.`
   )
   event("plugin.active", {
+    version: PLUGIN_VERSION,
     storeSize: repo.size(),
     bytesTotal: repo.totalBytes(),
     budgetBytes: config.maxMemoryBytes,
@@ -616,6 +663,7 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
           let error: string | undefined
           try {
             const lines: string[] = [
+              `version: ${PLUGIN_VERSION}`,
               `count: ${repo.size()}`,
               `bytes: ${humanBytes(repo.totalBytes())} / ${humanBytes(config.maxMemoryBytes)}`,
             ]
@@ -625,6 +673,7 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
               ingestedAt[cat] = ts ?? null
               lines.push(`${cat}: ${ts ? new Date(ts).toISOString() : "(never ingested)"}`)
             }
+            summary.version = PLUGIN_VERSION
             summary.totalMemories = repo.size()
             summary.bytesTotal = repo.totalBytes()
             summary.budgetBytes = config.maxMemoryBytes

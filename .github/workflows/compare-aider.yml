@@ -1,4 +1,4 @@
-# Compares tacit-memory's code map to aider's repo-map on a real
+# Compares diane's code map to aider's repo-map on a real
 # repository, and publishes the result to the run's job summary.
 #
 # This is an INFORMATIONAL workflow, not a merge gate. It is not wired
@@ -36,7 +36,7 @@ permissions:
 
 jobs:
   compare:
-    name: aider repo-map vs tacit-memory code-map
+    name: aider repo-map vs diane code-map
     runs-on: ubuntu-latest
     steps:
       - name: Checkout plugin
@@ -96,17 +96,17 @@ jobs:
           fi
           echo "aider map: $(wc -l < aider-map.txt) lines"
 
-      - name: Generate tacit-memory code-map
+      - name: Generate diane code-map
         run: |
-          bun scripts/dump-code-map.mjs target-repo > tacit-map.txt 2> tacit-stderr.txt || true
-          echo "tacit map: $(wc -l < tacit-map.txt) lines"
-          cat tacit-stderr.txt
+          bun scripts/dump-code-map.mjs target-repo > diane-map.txt 2> diane-stderr.txt || true
+          echo "diane map: $(wc -l < diane-map.txt) lines"
+          cat diane-stderr.txt
 
       - name: Compare and publish report
         run: |
           REPO_URL="${{ github.event.inputs.repo_url || 'https://github.com/BurntSushi/byteorder.git' }}"
           REPO_NAME="$(basename "$REPO_URL" .git)"
-          bun scripts/compare-aider.mjs aider-map.txt tacit-map.txt --repo "$REPO_NAME" \
+          bun scripts/compare-aider.mjs aider-map.txt diane-map.txt --repo "$REPO_NAME" \
             > comparison-report.md
           # Publish to the run's job summary so it's readable without
           # downloading anything.
@@ -121,8 +121,8 @@ jobs:
           path: |
             comparison-report.md
             aider-map.txt
-            tacit-map.txt
+            diane-map.txt
             aider-stderr.txt
-            tacit-stderr.txt
+            diane-stderr.txt
           retention-days: 30
           if-no-files-found: warn

@@ -675,10 +675,29 @@ warm.
 
 In addition to the human-readable lines that go to OpenCode's session
 log (via `client.app.log`), the plugin writes a structured JSON-Lines
-log to `os.tmpdir()/diane/` — typically `/tmp/diane/`
-on Linux, `/var/folders/.../T/diane/` on macOS. One file per
-process, named `diane-<iso-timestamp>-pid<pid>.jsonl`, so
-parallel OpenCode sessions never interleave.
+log to `os.tmpdir()/opencode-diane/` — typically
+`/tmp/opencode-diane/` on Linux,
+`/var/folders/.../T/opencode-diane/` on macOS. One file per process,
+named `diane-<iso-timestamp>-pid<pid>.jsonl`, so parallel OpenCode
+sessions never interleave.
+
+**Inside Docker:** the default `os.tmpdir()` path is ephemeral
+container storage — fine for ad-hoc runs but lost when the container
+exits. Set `OPENCODE_DIANE_LOG_DIR` to a mounted path and the logs
+flow to the host:
+
+```bash
+docker run \
+  -e OPENCODE_DIANE_LOG_DIR=/logs \
+  -v $PWD/logs:/logs \
+  …
+# then from outside the container:
+python3 analyze-logs.py --dir ./logs --plain
+```
+
+The env var is the write-side override; `analyze-logs.py --dir` is
+the read-side counterpart, so the two halves of the diagnostic loop
+work together regardless of where the logs are.
 
 Two record shapes share the file: prose `log()` lines and structured
 `event()` records. Every record carries `ts` (ISO ms-precision),
@@ -693,7 +712,13 @@ The events fired today:
 
 - `session.start` — header (pid, node, platform, cwd)
 - `plugin.idle` — directory has no git history and no project files
-- `plugin.active` — storeSize, bytesTotal, budgetBytes, feature flags
+- `plugin.active` — version, storeSize, bytesTotal, budgetBytes, feature flags
+- `store.migration.failed` — the legacy `diane.json` → SQLite migration
+  hit an error (the cause is in the `reason` field). The plugin does
+  **not** crash on this: it starts with an empty database, leaves the
+  JSON file in place, and the next startup retries. Observed in the
+  field when running alongside heavyweight plugins (e.g. oh-my-opencode)
+  whose own startup contends for resources during ours.
 - `prefill.start` / `prefill.complete` / `prefill.failed` (with ms)
 - `adaptive.tuned` — the size signal and the chosen knobs
 - `ingest.project`, `ingest.git`, `ingest.sessions`, `ingest.code-map`
@@ -846,7 +871,7 @@ bun run check:size     # fails if the package exceeds its size ceiling
 bun run typecheck      # no emit
 bun run coverage:check # bun test --coverage, fails under the coverage floor
 bun run test:analyzer  # python tests for the log analyzer's plain-language report
-bun run verify:semantic # optional: runs the real e5 model on RU/EN/ZH fixtures
+bun run verify:semantic # optional: runs the real e5 model on a 9-language fixture set
 ```
 
 CI (`.github/workflows/ci.yml`) runs typecheck → lint → build → test →
@@ -862,6 +887,16 @@ bun run clean && bun run build                        # also the prepublishOnly 
 npm version <patch|minor|major>                       # bump version + git tag
 npm publish --access public                           # npm is the registry
 ```
+
+**The version lives in exactly one place:** `package.json#version`.
+`npm version <patch|minor|major>` edits that field (and creates a
+matching git tag). At plugin startup `src/index.ts` reads it from
+that same `package.json` and the value flows from there to the
+`plugin.active` log event (so the running version is in every
+session's JSONL log) and to the `memory_status` tool's output (so an
+agent can ask which version is loaded). There is no second place to
+update — change `package.json#version`, rebuild, and every consumer
+picks up the new number.
 
 `bun pm pack --dry-run` lists exactly what would be packed; the `files`
 allowlist in `package.json` limits the tarball to `dist/`, `grammars/`,
@@ -1068,9 +1103,15 @@ lexicon. The stub is used on purpose: the cross-lingual *quality* is a
 property of Microsoft's e5 model, benchmarked by its authors, and CI
 should not re-prove it by downloading 120 MB on every run. The real
 model is verified separately by `scripts/verify-semantic.mjs` (run it
-once where the Hugging Face Hub is reachable: `bun run verify:semantic`)
-— it embeds Russian, English and Chinese code comments and confirms
-each cross-lingual query retrieves the right passage.
+once where the Hugging Face Hub is reachable: `bun run verify:semantic`).
+That script covers **nine languages on a two-tier scheme**: a *core*
+tier of well-represented languages (English, Chinese, Russian,
+Japanese, Spanish, Turkish) whose cross-lingual matches gate the exit
+code, plus an *experimental* tier of low-resource Cyrillic languages
+(Mongolian, Tajik, Kyrgyz) whose results are reported but do not fail
+the script — an honest empirical view of how the model handles
+languages it was trained on with very uneven amounts of data, rather
+than a pretence that it handles all of them equally.
 
 ## Real-world usefulness — when it helps, when it doesn't
 

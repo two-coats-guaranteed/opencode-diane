@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "opencode-tacit-memory",
+      "name": "opencode-diane",
       "dependencies": {
         "@opencode-ai/plugin": ">=1.14.0",
         "web-tree-sitter": "0.25.10",

@@ -146,8 +146,18 @@ export class SqliteStore {
    * there is a legacy JSON store and no DB yet, the JSON is migrated
    * into the fresh DB and renamed aside. Returns the store handle and
    * everything in it (the repository reads this once at construction).
+   *
+   * A legacy-migration failure is reported via `onMigrationError`
+   * rather than thrown: the plugin's startup keeps going with an
+   * empty fresh database — losing memories is recoverable (the next
+   * open retries the migration); failing to start is not. See
+   * `migrateFromJson` for the rationale.
    */
-  static open(root: string, log?: (msg: string) => void): { store: SqliteStore; loaded: LoadedStore } {
+  static open(
+    root: string,
+    log?: (msg: string) => void,
+    onMigrationError?: (e: unknown) => void,
+  ): { store: SqliteStore; loaded: LoadedStore } {
     const dbPath = dbFilePath(root)
     mkdirSync(dirname(dbPath), { recursive: true })
     const dbExisted = existsSync(dbPath)
@@ -155,7 +165,7 @@ export class SqliteStore {
     const store = new SqliteStore(db)
 
     if (!dbExisted) {
-      const migrated = store.migrateFromJson(root)
+      const migrated = store.migrateFromJson(root, onMigrationError)
       if (migrated > 0 && log) {
         log(`migrated ${migrated} memories from legacy diane.json`)
       }
@@ -228,13 +238,28 @@ export class SqliteStore {
   }
 
   /**
-   * One-time legacy migration: if a `diane.json` exists, load
-   * it, bulk-insert into the fresh DB in one transaction, and rename
-   * the JSON to `.json.migrated` so it is not re-migrated and the user
-   * keeps a backup. Returns the number of memories migrated (0 if
-   * there was nothing to migrate or the JSON was unreadable).
+   * One-time legacy migration: if a `diane.json` exists, load it,
+   * bulk-insert into the fresh DB in one transaction, and rename the
+   * JSON to `.json.migrated` so it is not re-migrated and the user
+   * keeps a backup.
+   *
+   * **Failure is not propagated.** A legacy-store migration is best-
+   * effort housekeeping; if it cannot complete for any reason (the
+   * JSON is corrupt, the database is held by another process, disk is
+   * full, a concurrent plugin's startup is blocking us) we MUST NOT
+   * crash the plugin's startup — that was the failure mode this code
+   * was rewritten to fix. Instead we log the cause, leave the JSON
+   * file untouched (the user keeps their data), and return 0 so the
+   * caller continues with an empty fresh database. The next open will
+   * find the JSON still in place and try the migration again.
+   *
+   * Returns the number of memories actually migrated, or 0 on any
+   * failure (including no JSON to migrate, which is also "0 migrated").
+   * `onError`, if provided, is called once on a real failure (not the
+   * "no JSON file" or "wrong schema version" cases) with the cause —
+   * the caller surfaces it as a structured event.
    */
-  private migrateFromJson(root: string): number {
+  private migrateFromJson(root: string, onError?: (e: unknown) => void): number {
     const jsonPath = `${root}/${JSON_REL}`
     if (!existsSync(jsonPath)) return 0
 
@@ -249,7 +274,16 @@ export class SqliteStore {
     }
 
     const meta = parsed.meta ?? emptyMeta()
-    this.flush(parsed.memories, [], meta)
+    try {
+      this.flush(parsed.memories, [], meta)
+    } catch (e) {
+      // The bulk insert failed mid-way. The SQLite transaction is
+      // rolled back automatically; the JSON file is still in place;
+      // we report the cause and leave the database in its empty
+      // freshly-created state. The plugin's startup continues.
+      if (onError) onError(e)
+      return 0
+    }
 
     try {
       renameSync(jsonPath, `${jsonPath}.migrated`)
