@@ -199,6 +199,26 @@ export interface UserConfig {
    */
   coChangeMinOccurrences?: number
   /**
+   * Maximum number of source files the code-map ingester parses per
+   * pass. By default this is set adaptively (1500 small / 4000 medium
+   * / 10000 large), based on a one-shot measurement of the repo at
+   * startup. Setting this explicitly *overrides the adaptive
+   * decision* — useful when you know your repo's right size and want
+   * deterministic behaviour. Set to a small value to speed up
+   * startup at the cost of code-map completeness; raise for very
+   * large monorepos. Default `4000` (medium tier).
+   */
+  codeMapMaxFiles?: number
+  /**
+   * Maximum number of git commits the co-change graph builder
+   * scans per pass. By default adaptive (1000 small / 5000 medium /
+   * 20000 large). Setting this explicitly overrides the adaptive
+   * choice. Lower for faster startup at the cost of co-change graph
+   * density; raise for repos where you want deeper history coverage.
+   * Default `5000` (medium tier).
+   */
+  coChangeMaxCommits?: number
+  /**
    * The recall-first nudge: a tool.execute.before/after hook pair that
    * appends ONE reminder to a discovery tool's output if the agent
    * does raw discovery without checking memory. Default TRUE.

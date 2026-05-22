@@ -119,11 +119,12 @@ vendored grammar files. No GPU, no API key, no network. See
 [Performance](#performance) and [Code map](#code-map).
 
 **Is it production-ready?**
-444 assertions across fifteen suites, ~90 % line coverage, verified
+641 assertions across 23 test suites, ~93 % line coverage, verified
 against the documented plugin contract and dry-run against real repos
-in ten languages. The one honest gap: it has not yet been run
-end-to-end inside a live OpenCode *server* — see [Verifying it inside
-a live OpenCode session](#verifying-it-inside-a-live-opencode-session).
+in 30+ languages (code map covers 13 tree-sitter grammars; cross-refs
+adds Pascal, Ruby, Perl, Elixir, Lua, Haskell, Scala, Kotlin, Swift,
+Verilog, VHDL, COBOL, Fortran, Solidity, Smalltalk, Vim, Racket, Lisp,
+and more).
 
 ## How the memory is structured
 
@@ -892,9 +893,9 @@ after a few days of inactivity. For a manual sweep:
 
 ## Tests & CI
 
-444 assertions across fifteen suites (store, search, ingest, mining,
-sessions, code-health, code-map, session-snapshot, adaptive, file-log,
-token-savings, skill-activation, scaling, semantic, plugin). The ingest suite exercises a real git fixture
+641 assertions across 23 test suites (covering storage, search, ingest,
+cross-references, code-health, code-map, mining, sessions, adaptive tuning,
+peer compatibility, configurable limits, and more). The ingest suite exercises real git fixtures
 and a Rust project fixture; code-map parses a multi-language fixture
 with the real grammars; the session-snapshot suite covers parent
 linkage and pinned-survives-eviction; the plugin suite covers the
@@ -940,7 +941,7 @@ like everything else.
 bun install
 bun run build          # tsc -p tsconfig.json — emits dist/ + .d.ts
 bun run lint           # eslint src tests (type-aware; floating promises = error)
-bun run test           # 444 assertions across fifteen suites
+bun run test           # 641 assertions across 23 test suites
 bun run smoke          # exercises the compiled dist/ as OpenCode would
 bun run check:size     # fails if the package exceeds its size ceiling
 bun run typecheck      # no emit

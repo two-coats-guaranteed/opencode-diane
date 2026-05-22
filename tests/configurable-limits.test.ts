@@ -238,6 +238,71 @@ async function main() {
     } finally { await rm(root, { recursive: true, force: true }) }
   }
 
+  // ── codeMapMaxFiles + coChangeMaxCommits: explicit override beats
+  //    adaptive sizing ────────────────────────────────────────────
+  console.log("── codeMapMaxFiles / coChangeMaxCommits: explicit user value beats adaptive ──")
+  {
+    // Import here to avoid loading adaptive on every test
+    const { applyAdaptiveTuning } = await import("../src/ingest/adaptive.js")
+
+    // Case 1: user did NOT set codeMapMaxFiles — adaptive should
+    // override it based on the tier.
+    {
+      const cfg: any = {
+        adaptive: true,
+        explicitKeys: new Set<string>(),
+        codeMapMaxFiles: 4000,     // default value
+        coChangeMaxCommits: 5000,  // default value
+        gitHistoryDepth: 500,
+        maxMemoryBytes: 50 * 1024 * 1024,
+      }
+      applyAdaptiveTuning(cfg, { tier: "small", basis: "commits", value: 50 })
+      assert(cfg.codeMapMaxFiles === 1500,
+        `adaptive sizes small repo to codeMapMaxFiles=1500 when not explicit (got ${cfg.codeMapMaxFiles})`)
+      // coChangeMaxCommits is uniform at 5000 across all tiers — adaptive
+      // doesn't currently vary it, so the value stays at the tier's 5000.
+      assert(cfg.coChangeMaxCommits === 5000,
+        `adaptive keeps coChangeMaxCommits at tier value 5000 (got ${cfg.coChangeMaxCommits})`)
+    }
+
+    // Case 2: user explicitly set codeMapMaxFiles — adaptive must
+    // NOT override it.
+    {
+      const cfg: any = {
+        adaptive: true,
+        explicitKeys: new Set(["codeMapMaxFiles"]),
+        codeMapMaxFiles: 8000,     // user's value
+        coChangeMaxCommits: 5000,
+        gitHistoryDepth: 500,
+        maxMemoryBytes: 50 * 1024 * 1024,
+      }
+      applyAdaptiveTuning(cfg, { tier: "small", basis: "commits", value: 50 })
+      assert(cfg.codeMapMaxFiles === 8000,
+        `explicit user codeMapMaxFiles:8000 not overridden by adaptive (got ${cfg.codeMapMaxFiles})`)
+      // coChangeMaxCommits is uniform across tiers (5000) — adaptive doesn't change it
+      // here, but our adaptive code still respects explicitKeys for it.
+      assert(cfg.coChangeMaxCommits === 5000,
+        `coChangeMaxCommits stays at tier value 5000 when not in explicitKeys (got ${cfg.coChangeMaxCommits})`)
+    }
+
+    // Case 3: user explicitly set BOTH — both kept
+    {
+      const cfg: any = {
+        adaptive: true,
+        explicitKeys: new Set(["codeMapMaxFiles", "coChangeMaxCommits"]),
+        codeMapMaxFiles: 8000,
+        coChangeMaxCommits: 200,
+        gitHistoryDepth: 500,
+        maxMemoryBytes: 50 * 1024 * 1024,
+      }
+      applyAdaptiveTuning(cfg, { tier: "large", basis: "commits", value: 50000 })
+      assert(cfg.codeMapMaxFiles === 8000,
+        `large-tier adaptive ignores explicit codeMapMaxFiles:8000 (got ${cfg.codeMapMaxFiles})`)
+      assert(cfg.coChangeMaxCommits === 200,
+        `large-tier adaptive ignores explicit coChangeMaxCommits:200 (got ${cfg.coChangeMaxCommits})`)
+    }
+  }
+
   console.log("")
   console.log("──────────────────────────────────────────────────────────")
   console.log(`  ${passed} passed, ${failed} failed`)

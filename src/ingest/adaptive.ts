@@ -202,13 +202,15 @@ export function applyAdaptiveTuning(
       changes.push(`budget=${mb}MB`)
     }
   }
-  // codeMapMaxFiles and coChangeMaxCommits aren't user-exposed, so
-  // they're always set from the tier — report only when they move.
-  if (config.codeMapMaxFiles !== t.codeMapMaxFiles) {
+  // codeMapMaxFiles and coChangeMaxCommits are user-exposable since
+  // v0.0.4 — respect an explicit override; otherwise follow the tier.
+  if (!config.explicitKeys.has("codeMapMaxFiles") && config.codeMapMaxFiles !== t.codeMapMaxFiles) {
     config.codeMapMaxFiles = t.codeMapMaxFiles
     changes.push(`codeMapMaxFiles=${t.codeMapMaxFiles}`)
   }
-  config.coChangeMaxCommits = t.coChangeMaxCommits
+  if (!config.explicitKeys.has("coChangeMaxCommits")) {
+    config.coChangeMaxCommits = t.coChangeMaxCommits
+  }
 
   const coChangeNote =
     signal.basis === "commits" && signal.value > t.coChangeMaxCommits

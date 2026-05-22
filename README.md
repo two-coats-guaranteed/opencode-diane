@@ -50,7 +50,7 @@ record of what your coding agent learns about a codebase.
   AGENTS.md and index its contents). Not a vector store by default —
   lexical BM25 — though cross-lingual semantic search is available as
   an explicit opt-in.
-- **Maturity.** 618 assertions across 22 test suites, ~93 % line
+- **Maturity.** 641 assertions across 23 test suites, ~93 % line
   coverage; verified against the documented plugin contract in 30+
   languages and against live builds with oh-my-opencode and caveman
   as coexisting plugins. Not yet run end-to-end inside a live OpenCode

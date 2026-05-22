@@ -1382,6 +1382,8 @@ function coerceUserConfig(options: unknown): UserConfig {
   num("tablesMaxColumns")
   num("notesMaxBytes")
   num("coChangeMinOccurrences")
+  num("codeMapMaxFiles")
+  num("coChangeMaxCommits")
   bool("enableNudgeHook")
   bool("adaptive")
   bool("enableSemanticSearch")
@@ -1431,8 +1433,8 @@ function resolveConfig(user: UserConfig): ResolvedConfig {
     // Size-derived knobs — these are the fixed (medium-tier) defaults;
     // applyAdaptiveTuning overwrites them from the measured repo
     // signal when `adaptive` is true.
-    codeMapMaxFiles: 4000,
-    coChangeMaxCommits: 5000,
+    codeMapMaxFiles: Math.max(1, Math.round(user.codeMapMaxFiles ?? 4000)),
+    coChangeMaxCommits: Math.max(1, Math.round(user.coChangeMaxCommits ?? 5000)),
   }
 }
 
