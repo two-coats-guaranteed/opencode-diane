@@ -50,7 +50,7 @@ record of what your coding agent learns about a codebase.
   AGENTS.md and index its contents). Not a vector store by default —
   lexical BM25 — though cross-lingual semantic search is available as
   an explicit opt-in.
-- **Maturity.** 674 assertions across 24 test suites, ~90 % line
+- **Maturity.** 691 assertions across 26 test suites, ~90 % line
   coverage; verified against the documented plugin contract in 30+
   languages and against live builds with oh-my-opencode and caveman
   as coexisting plugins. Not yet run end-to-end inside a live OpenCode
@@ -97,7 +97,6 @@ loads, runs prefill in the background, registers all ten tools, and
 the agent can use them immediately. If the directory is neither a git
 repo nor has a recognised manifest, the plugin logs one idle line and
 does nothing.
-
 
 The Aider-style code map is **on by default** since v0.0.4 — it gives
 `memory_code_map` and recall enough structural signal (per-file
@@ -230,6 +229,7 @@ limits are clamped to a safe minimum and rounded; garbage input in
 - *Semantic search* — the opt-in cross-lingual embedding feature
 - *Token savings* — what reduction to expect, and how it is measured
 - *Performance* & *Scaling* — measured numbers, and the honest heap caveat
+- *Prompt-cache friendliness* — what's byte-stable across calls, what's deliberately not
 - *Code map*, *Session snapshots*, *Skill mining*, *Rich logs*, *Tests & CI*
 
 ## License

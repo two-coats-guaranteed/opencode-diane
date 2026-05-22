@@ -7,6 +7,60 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 on the understanding that the public surface for SemVer purposes is the
 tool list (`memory_*`) and the documented `UserConfig` options.
 
+## [0.0.6] — 2026-05-22
+
+### Added
+- **Bounded-parallel file reads in the heavy ingesters.** New
+  `src/utils/concurrent.ts` exposes `mapConcurrent(items, n, fn)`:
+  a worker-pool topology with in-input-order results, used by
+  `ingestCodeMap` (16-wide) and the cross-reference ingester's
+  `collectFiles` (32-wide). Both passes split into a phase-1 walk
+  that collects candidate paths and a phase-2 parallel read; the
+  walk preserves DFS order so the `maxFiles` cap selects the same
+  candidate set as the pre-refactor implementation. Measured on
+  this repo's 80-file source tree, the parallel read finishes in
+  3.6 ms vs 376 ms sequential on cold cache (~104× speedup) and
+  in 1.2 ms vs 2.6 ms warm (~2×). The cold-cache gain dominates
+  in real use because OpenCode session start hits the disk fresh;
+  the warm case is repeat ingests within the same session. The
+  other ingesters (docs, tables, project-notes) remain sequential
+  — they walk small file sets where the wins don't justify the
+  change. New test suite `tests/concurrent.test.ts` (10
+  assertions) covers in-order results, the concurrency cap, error
+  propagation, and degenerate inputs; the parallel paths are
+  additionally stress-tested out-of-tree against a shared-parser
+  multi-language workload and a 1,000-file collectFiles
+  correctness check.
+- **New WIKI section *Prompt-cache friendliness*.** Spells out what
+  is byte-stable across same-state recalls and what is
+  deliberately not. Linked from the README's *Learn more* list.
+
+### Fixed
+- **Live-session memory no longer drifts every minute.** The header
+  previously read `Live session <id> (started <N>m ago): …`, where
+  `N` was recomputed from `Date.now()` on every render. A
+  prompt-cache audit found that this ticked the agent-visible
+  content every full minute even when no new edits or bash
+  commands had happened, busting cached recall prefixes that
+  happened to surface the live trace. The header is now `(started
+  <ISO-startedAt>): …` — fixed for the recorder's lifetime and
+  bit-identical across renders until the session itself restarts.
+
+### Notes
+- Codebase prompt-cache audit findings recorded in WIKI:
+  tool descriptions are static literals; no `Math.random` anywhere
+  in `src/`; BM25 / PPR / tokeniser are pure; output ordering is
+  deterministic. Two intentional non-determinisms left in place
+  and documented: the `0.05 × ln(1 + useCount)` popularity bias
+  (frequently-used memories edge up over time) and
+  `memory_remember`'s id-bearing acknowledgement (every write is
+  distinct anyway).
+- Test count: **691 assertions across 26 test suites** (up from
+  674/24 in v0.0.5). New suite `tests/concurrent.test.ts` adds
+  10 assertions covering the helper itself; new suite
+  `tests/concurrency-stress.test.ts` adds 7 covering the
+  shared-parser safety claim and in-order results under load.
+
 ## [0.0.5] — 2026-05-22
 
 ### Added

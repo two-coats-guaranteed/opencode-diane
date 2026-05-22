@@ -35,8 +35,19 @@ import { extname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import type { Category } from "../types.js"
 import type { MemoryRepository } from "../store/repository.js"
+import { mapConcurrent } from "../utils/concurrent.js"
 
 const CATEGORY: Category = "code-map"
+
+/**
+ * How many source files the code-map ingester processes in parallel.
+ * The tree-sitter parser itself is shared and synchronous (see the
+ * note in `ingestCodeMap`), so we benefit specifically from
+ * overlapping `readFile` waits across tasks. 16 is conservative —
+ * the parser is heavier per call than a plain read, so we don't want
+ * a queue of 32+ parses waiting on one CPU.
+ */
+const CODE_MAP_CONCURRENCY = 16
 
 /** Directories never worth walking for a signature map. */
 const SKIP_DIRS = new Set([
@@ -506,10 +517,17 @@ export async function ingestCodeMap(
   const eng = engine // narrowed — closures below need the non-union type
 
   const parser = new eng.ParserClass()
-  let filesVisited = 0
 
+  // Phase 1: walk the tree and collect (path, language) candidates.
+  // Only `readdir` is awaited here; parsing and file reads are
+  // deferred to phase 2 so they can run in parallel. The walk
+  // preserves the original DFS order (subdirectories descended in
+  // listing order) so `maxFiles` selects the same candidate set as
+  // the pre-refactor sequential implementation when the cap fires.
+  interface Candidate { path: string; lang: string }
+  const candidates: Candidate[] = []
   async function walk(dir: string): Promise<void> {
-    if (filesVisited >= maxFiles) return
+    if (candidates.length >= maxFiles) return
     let entries: Array<{ name: string; isFile(): boolean; isDirectory(): boolean }>
     try {
       entries = await readdir(dir, { withFileTypes: true })
@@ -517,20 +535,31 @@ export async function ingestCodeMap(
       return
     }
     for (const e of entries) {
-      if (filesVisited >= maxFiles) return
+      if (candidates.length >= maxFiles) return
       if (e.isDirectory()) {
         if (SKIP_DIRS.has(e.name) || e.name.startsWith(".")) continue
         await walk(join(dir, e.name))
       } else if (e.isFile()) {
         const lang = EXT_TO_LANG[extname(e.name).toLowerCase()]
         if (!lang) continue
-        filesVisited += 1
-        await parseAndStoreFile(repo, root, join(dir, e.name), lang, parser, eng.getLanguage, result)
+        candidates.push({ path: join(dir, e.name), lang })
       }
     }
   }
-
   await walk(root)
+
+  // Phase 2: parse and store, with bounded parallelism on the file
+  // reads. The tree-sitter parser is shared across tasks, which is
+  // safe because the parser-using sequence (`parser.setLanguage(L);
+  // parser.parse(src)`) is fully synchronous: no `await` appears
+  // between `setLanguage` and `parse`, so the JS event loop cannot
+  // interleave another task into the middle of one parse. Only the
+  // `readFile` step inside `parseAndStoreFile` yields control,
+  // which is exactly the point — that's what we parallelise.
+  await mapConcurrent(candidates, CODE_MAP_CONCURRENCY, async ({ path, lang }) => {
+    await parseAndStoreFile(repo, root, path, lang, parser, eng.getLanguage, result)
+  })
+
   result.languagesSeen.sort()
   repo.setIngestedAt(CATEGORY, Date.now())
   return result

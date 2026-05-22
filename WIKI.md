@@ -119,7 +119,7 @@ vendored grammar files. No GPU, no API key, no network. See
 [Performance](#performance) and [Code map](#code-map).
 
 **Is it production-ready?**
-674 assertions across 24 test suites, ~90 % line coverage, verified
+691 assertions across 26 test suites, ~90 % line coverage, verified
 against the documented plugin contract and dry-run against real repos
 in 30+ languages (code map covers 13 tree-sitter grammars; cross-refs
 adds Pascal, Ruby, Perl, Elixir, Lua, Haskell, Scala, Kotlin, Swift,
@@ -177,7 +177,7 @@ elaborate:
   │   ├─ subject "package.json"
   │   └─ subject "<tree>"
   │
-  ├─ code-map ········· one signature digest per source file
+  ├─ code-map ········· one signature digest per source file  (on by default)
   ├─ code-health ······ one LSP error/warning summary per file (live)
   ├─ session-snapshot · one per session — mental model, decisions
   ├─ session-trace ···· task + tool-trace summaries of past sessions
@@ -376,7 +376,7 @@ dependency.
 *signatures* of its definitions (bodies stripped) — an Aider-style
 repo map, reachable via `memory_code_map`. This is the one
 heavyweight, language-aware feature; see *Code map* below for the
-runtime cost and how to turn it 
+runtime cost and how to turn it off.
 
 **6. Session snapshots.** `memory_snapshot` records a session's
 *understanding* — mental model, decisions, learned conventions — as a
@@ -925,7 +925,7 @@ after a few days of inactivity. For a manual sweep:
 
 ## Tests & CI
 
-674 assertions across 24 test suites (covering storage, search, ingest,
+691 assertions across 26 test suites (covering storage, search, ingest,
 cross-references, code-health, code-map, mining, sessions, adaptive tuning,
 peer compatibility, configurable limits, and more). The ingest suite exercises real git fixtures
 and a Rust project fixture; code-map parses a multi-language fixture
@@ -973,7 +973,7 @@ like everything else.
 bun install
 bun run build          # tsc -p tsconfig.json — emits dist/ + .d.ts
 bun run lint           # eslint src tests (type-aware; floating promises = error)
-bun run test           # 674 assertions across 24 test suites
+bun run test           # 691 assertions across 26 test suites
 bun run smoke          # exercises the compiled dist/ as OpenCode would
 bun run check:size     # fails if the package exceeds its size ceiling
 bun run typecheck      # no emit
@@ -1402,6 +1402,71 @@ Together these three close the gaps surfaced by the v0.0.4 reflection
 verdict: the current session's work, bash-driven file changes, and
 post-merge commits are all visible to recall mid-session, not only
 after a restart.
+
+## Prompt-cache friendliness
+
+Most modern LLM providers (Anthropic, OpenAI, Google) cache prefixes
+of a conversation and reuse them on subsequent requests when the
+prefix bytes are identical. A tool call whose output drifts across
+otherwise-identical calls invalidates that cache — so on long
+agent sessions, repeatedly calling `memory_recall("auth flow")` ends
+up costing full input-token price every time even though the
+underlying store hasn't changed. Diane is built to keep that from
+happening.
+
+**What is held byte-stable across calls with the same store state:**
+
+- **All ten tool descriptions are static literals**, set once at
+  plugin load and never edited. They are the cache anchor every later
+  message benefits from.
+- **Retrieval is fully deterministic.** No `Math.random` anywhere in
+  the codebase. BM25 scoring is pure arithmetic over the index. The
+  optional personalised PageRank uses a fixed teleport α, fixed
+  convergence tolerance, fixed iteration cap, and insertion-order
+  node iteration — same graph + same seeds → bit-identical scores.
+- **The tokeniser is pure.** Same input string → same token list,
+  always — true for both Latin and CJK runs.
+- **Output ordering is stable.** `memory_outline` sorts categories by
+  count descending; `memory_recall` and `memory_code_map` sort hits
+  by BM25 score descending; ties break by `Map` insertion order,
+  which is the store's insertion order — itself stable across runs
+  because ingest passes are deterministic.
+- **Timestamps are ISO-formatted when they appear in output**, and
+  only change when the underlying event actually happened.
+  `memory_status` reports per-category last-ingest times; they shift
+  only when a re-ingest fires. The live-session memory's header
+  carries the session's `startedAt` as ISO (not "Nm ago"), so it is
+  fixed for the recorder's lifetime rather than ticking every
+  minute — fixed in v0.0.6 after the v0.0.5 audit found that minute
+  drift was busting cached recall prefixes that surfaced the live
+  trace.
+
+**Intentional non-determinisms** (worth knowing, never an accident):
+
+- **The popularity bias.** BM25 scoring adds `0.05 × ln(1 + useCount)`
+  to each hit, so frequently-used memories edge up over time. On
+  close-tie queries, the same query repeated twice in a row across a
+  recall that consumed those hits can return a different order. The
+  effect is small (~0.035 per first recall) and bounded by `log1p`,
+  but it does break cache on the affected hits. The behaviour is
+  deliberate: a memory that the agent keeps reaching for should
+  surface earlier, even at the cost of cache friction.
+- **`memory_remember` returns a fresh memory id** in its
+  acknowledgement (`stored: mem_<base36-time>_<counter> …`). Every
+  write is a different write, so this is correct; it just means two
+  identical `memory_remember` calls do not cache against each other.
+  Treat the acknowledgement as ephemeral.
+- **Live-session content grows as the session progresses.** Every
+  file edit and bash command extends the rolling `live:${sessionId}`
+  memory. That's the feature, not a bug — but it does mean a recall
+  that surfaces the live trace returns a slightly longer string each
+  time. The header stays stable (see above); only the body grows.
+
+**What this lets you assume.** A second `memory_recall("auth flow")`
+issued before either the store changes or many recalls bump the
+popularity bias of the same hits will produce a byte-identical
+result string — and the cached input-token prefix all the way up to
+that point pays once, not twice.
 
 ## Compatibility
 

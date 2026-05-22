@@ -114,13 +114,17 @@ export class LiveSessionRecorder {
 
   /**
    * Render the current state as memory content. Format is stable so
-   * BM25 tokenisation behaves predictably.
+   * BM25 tokenisation behaves predictably — and so prompt-cache hits
+   * survive across recall calls. The header uses the session's start
+   * time as an ISO timestamp (fixed for the lifetime of this
+   * recorder), not "Nm ago" (which would tick every minute and bust
+   * any cached prefix that contains this memory).
    */
   private renderContent(): string {
-    const ageMin = Math.round((Date.now() - this.startedAt) / 60000)
+    const startedIso = new Date(this.startedAt).toISOString()
     const lines: string[] = []
     lines.push(
-      `Live session ${this.sessionId} (started ${ageMin}m ago): ` +
+      `Live session ${this.sessionId} (started ${startedIso}): ` +
         `${this.editCount} file edit${this.editCount === 1 ? "" : "s"}, ` +
         `${this.bashCount} bash command${this.bashCount === 1 ? "" : "s"}.`
     )

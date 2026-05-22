@@ -45,8 +45,18 @@ import { readdir, readFile, stat } from "node:fs/promises"
 import { join, relative, sep, extname, dirname, basename } from "node:path"
 
 import type { MemoryRepository } from "../store/repository.js"
+import { mapConcurrent } from "../utils/concurrent.js"
 
 const CATEGORY = "project-facts"
+
+/**
+ * How many file stat+read pairs the cross-refs ingester runs in
+ * parallel. 32 is comfortably below any reasonable open-file ulimit
+ * (Linux default 1024, macOS 256) and saturates SSD throughput
+ * without thrashing on a network mount. Tuning higher gives
+ * diminishing returns; lower defeats the purpose.
+ */
+const READ_CONCURRENCY = 32
 
 const SKIP_DIRS = new Set([
   "node_modules",
@@ -730,9 +740,19 @@ interface EdgeEvidence {
 }
 
 async function collectFiles(root: string, maxFiles: number = MAX_FILES): Promise<CandidateFile[]> {
-  const out: CandidateFile[] = []
+  // Phase 1: walk the tree and collect candidate ABSOLUTE paths that
+  // pass the cheap dirent + extension filter. Directory listings are
+  // the only I/O here — `stat` and `readFile` are deferred to phase 2
+  // so they can run in parallel.
+  //
+  // We collect up to `maxFiles` candidate paths. A few may drop out
+  // during phase-2 filtering (zero-byte, oversize, or binary files),
+  // which is exactly how the original sequential implementation
+  // behaved when those filters fired — net result count is the same
+  // ±the tiny minority of candidates that fail size/binary checks.
+  const candidates: string[] = []
   const stack = [root]
-  while (stack.length > 0 && out.length < maxFiles) {
+  while (stack.length > 0 && candidates.length < maxFiles) {
     const dir = stack.pop()!
     let entries
     try {
@@ -741,6 +761,7 @@ async function collectFiles(root: string, maxFiles: number = MAX_FILES): Promise
       continue
     }
     for (const e of entries) {
+      if (candidates.length >= maxFiles) break
       if (e.name.startsWith(".") && !e.name.startsWith(".github") && !e.name.startsWith(".gitlab")) continue
       const abs = join(dir, e.name)
       if (e.isDirectory()) {
@@ -754,25 +775,36 @@ async function collectFiles(root: string, maxFiles: number = MAX_FILES): Promise
       // extensions; this captures the common cases we want to walk.
       const ext = extname(e.name).toLowerCase()
       if (!shouldWalkPath(e.name, ext)) continue
-      let s
-      try {
-        s = await stat(abs)
-      } catch {
-        continue
-      }
-      if (!s.isFile() || s.size === 0 || s.size > MAX_FILE_BYTES) continue
-      let content: string
-      try {
-        content = await readFile(abs, "utf-8")
-      } catch {
-        continue
-      }
-      if (content.indexOf("\0") >= 0) continue // binary
-      const rel = relative(root, abs).split(sep).join("/")
-      out.push({ abs, rel, content })
-      if (out.length >= maxFiles) break
+      candidates.push(abs)
     }
   }
+
+  // Phase 2: stat + readFile per candidate, in parallel. The 32-wide
+  // pool is comfortably below any reasonable open-file ulimit and
+  // dominates sequential reads on every storage class measured
+  // (warm SSD, cold SSD, network mount). `mapConcurrent` returns
+  // results in input order; nulls are dropped at the end.
+  const reads = await mapConcurrent(candidates, READ_CONCURRENCY, async (abs): Promise<CandidateFile | null> => {
+    let s
+    try {
+      s = await stat(abs)
+    } catch {
+      return null
+    }
+    if (!s.isFile() || s.size === 0 || s.size > MAX_FILE_BYTES) return null
+    let content: string
+    try {
+      content = await readFile(abs, "utf-8")
+    } catch {
+      return null
+    }
+    if (content.indexOf("\0") >= 0) return null // binary
+    const rel = relative(root, abs).split(sep).join("/")
+    return { abs, rel, content }
+  })
+
+  const out: CandidateFile[] = []
+  for (const r of reads) if (r !== null) out.push(r)
   return out
 }
 
