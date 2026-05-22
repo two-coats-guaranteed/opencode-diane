@@ -57,7 +57,7 @@ happened or physically exists**:
 - From the language server (live): current diagnostics per file —
   the compiler's / type-checker's own output, normalised by LSP
   across 40+ languages. No heuristics.
-- From tree-sitter (opt-in): per-file definition *signatures* — the
+- From tree-sitter (on by default): per-file definition *signatures* — the
   structural shape of the code, bodies stripped.
 
 ## Straight answers for a decision-maker
@@ -177,7 +177,7 @@ elaborate:
   │   ├─ subject "package.json"
   │   └─ subject "<tree>"
   │
-  ├─ code-map ········· one signature digest per source file  (opt-in)
+  ├─ code-map ········· one signature digest per source file
   ├─ code-health ······ one LSP error/warning summary per file (live)
   ├─ session-snapshot · one per session — mental model, decisions
   ├─ session-trace ···· task + tool-trace summaries of past sessions
@@ -358,7 +358,7 @@ What prefill does, on every startup:
         │
         ├── git log --numstat --summary -> per-commit · co-change · churn · recency
         ├── walk the file tree ----------> extension census · layout · manifest digests
-        ├── tree-sitter parse  (opt-in) -> per-file signature digests   (code-map)
+        ├── tree-sitter parse  ----------> per-file signature digests   (code-map)
         ├── past OpenCode sessions ------> task + tool-trace summaries
         └── most recent session-snapshot > resume point logged
         │
@@ -371,11 +371,12 @@ file reflecting its *current* error/warning count — re-reports
 replace, not accumulate. Convention-free, language-agnostic, no new
 dependency.
 
-**5. Code map (opt-in).** With `enableCodeMap`, tree-sitter parses
-each source file and stores the *signatures* of its definitions
-(bodies stripped) — an Aider-style repo map, reachable via
-`memory_code_map`. This is the one heavyweight, language-aware
-feature; see *Code map* below.
+**5. Code map (on by default since v0.0.4).** With `enableCodeMap`
+(default `true`), tree-sitter parses each source file and stores the
+*signatures* of its definitions (bodies stripped) — an Aider-style
+repo map, reachable via `memory_code_map`. This is the one
+heavyweight, language-aware feature; see *Code map* below for the
+runtime cost and how to turn it 
 
 **6. Session snapshots.** `memory_snapshot` records a session's
 *understanding* — mental model, decisions, learned conventions — as a

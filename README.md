@@ -98,12 +98,21 @@ the agent can use them immediately. If the directory is neither a git
 repo nor has a recognised manifest, the plugin logs one idle line and
 does nothing.
 
-To enable some feature disabled by default, use the `[name, options]` 
-tuple form and restart OpenCode:
+
+The Aider-style code map is **on by default** since v0.0.4 — it gives
+`memory_code_map` and recall enough structural signal (per-file
+function/class/type signatures, 13 tree-sitter grammars) that turning
+it off is rarely worth it. The grammar `.wasm` files (~16 MB,
+vendored under `grammars/`) ship with the package regardless, since
+they're loaded lazily on first use; the option only controls whether
+the plugin parses files at prefill. If you want to skip that parsing
+— for a tighter prefill on a huge monorepo, or on a non-source repo
+where the code map adds no signal — disable it via the
+`[name, options]` tuple form:
 
 ```json
 {
-  "plugin": [["opencode-diane", { "enableCodeMap": true }]]
+  "plugin": [["opencode-diane", { "enableCodeMap": false }]]
 }
 ```
 
