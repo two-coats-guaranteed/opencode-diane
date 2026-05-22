@@ -28,6 +28,10 @@ import { fileURLToPath } from "node:url"
 import { MemoryRepository } from "./store/repository.js"
 import { ingestGitHistory } from "./ingest/git.js"
 import { ingestProjectFacts } from "./ingest/project.js"
+import { ingestDocs } from "./ingest/docs.js"
+import { ingestProjectNotes } from "./ingest/project-notes.js"
+import { ingestTableHeaders } from "./ingest/tables.js"
+import { ingestCrossRefs } from "./ingest/cross-refs.js"
 import { ingestSessions } from "./ingest/sessions.js"
 import { ingestCodeHealth } from "./ingest/code-health.js"
 import { ingestCodeMap, ingestCodeMapForFile } from "./ingest/code-map.js"
@@ -40,6 +44,7 @@ import { embedMissingMemories } from "./search/embed-pass.js"
 import { isGitRepo } from "./utils/shell.js"
 import { createFileLogger, truncateForLog } from "./utils/file-log.js"
 import { detectPeerPlugins } from "./utils/peer-detection.js"
+import { installUsageSkill } from "./utils/usage-skill.js"
 import { mineSkills, readMinedSkills } from "./mining/skill-miner.js"
 import type { Category, ResolvedConfig, UserConfig } from "./types.js"
 
@@ -384,6 +389,31 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
     minedSkillPrefix: config.minedSkillPrefix,
   })
 
+  // ── Install the agent-facing usage skill ──────────────────────────
+  // OpenCode discovers `.opencode/skills/<name>/SKILL.md` files at
+  // session start and surfaces their contents to the agent. We write
+  // ours on first startup so the agent learns to call memory_recall
+  // before raw grep/glob/read — the soft-force adoption mechanism
+  // promised in opencode.json: `installUsageSkill: true` (default).
+  //
+  // Failure here is a quality-of-life regression, never fatal: a
+  // read-only project root, a missing parent directory, anything —
+  // we log and continue. Plugin startup must never depend on this.
+  if (config.installUsageSkill) {
+    const res = installUsageSkill(root, config.skillsOutputDir, config.minedSkillPrefix)
+    fileLog.event("usage-skill.write", {
+      outcome: res.outcome,
+      path: res.path,
+      error: res.error ? String(res.error) : undefined,
+    })
+    if (res.outcome === "installed") {
+      log("info", `installed usage skill at ${res.path} — the agent will see it at session start`)
+    } else if (res.outcome === "failed") {
+      log("warn", `could not write the usage skill (${res.path}): ${res.error}`)
+    }
+    // "preserved" is silent — that's the steady state once installed.
+  }
+
   // ── 4. Tools ───────────────────────────────────────────────────────
   return {
     tool: {
@@ -639,8 +669,8 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
           "structurally-coupled neighbours surface too. Use it to find where a symbol " +
           "likely lives, or to orient before diving into a feature area — then `read` only " +
           "the specific files you actually need. Returns nothing useful unless code-map " +
-          "ingestion is enabled (config.enableCodeMap, off by default because it carries a " +
-          "heavier dependency); if it is empty, fall back to memory_recall + targeted reads.",
+          "ingestion is enabled (config.enableCodeMap, on by default since v0.0.4 — set " +
+          "it to false to disable); if it is empty, fall back to memory_recall + targeted reads.",
         args: {
           query: tool.schema
             .string()
@@ -681,8 +711,9 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
             summary.hadQuery = Boolean(args.query && args.query.trim())
             if (hits.length === 0) {
               return (
-                "(code map is empty — enable it with config.enableCodeMap, then restart " +
-                "OpenCode so the plugin can parse the tree)"
+                "(code map is empty — it is enabled by default; if you set " +
+                "config.enableCodeMap: false, re-enable it and restart OpenCode " +
+                "so the plugin can parse the tree)"
               )
             }
             const lines = hits.map(formatHit)
@@ -1111,11 +1142,93 @@ async function prefillInBackground(
     log("info", `prefill: project-facts ingested ${proj.facts} entries`)
     event("ingest.project", { facts: proj.facts })
 
+    // ── Three new ingest passes (added in v0.0.4) ──────────────────
+    // All three are opt-out via config; default-on because (a) they
+    // surface high-signal information for typical recalls and (b)
+    // cost is bounded by file caps inside each ingester.
+    if (config.ingestDocs) {
+      try {
+        const docs = await ingestDocs(repo, root, {
+          maxFiles:        config.docsMaxFiles,
+          bodyChars:       config.docsBodyChars,
+          maxHeadingLevel: config.docsMaxHeadingLevel,
+        })
+        if (docs.filesWalked > 0) {
+          log(
+            "info",
+            `prefill: docs ingested ${docs.headingsIndexed} headings across ${docs.filesWalked} files`,
+          )
+          event("ingest.docs", { ...docs })
+        }
+      } catch (err) {
+        // Ingestion is best-effort — a broken docs/ tree must not
+        // stall startup. Log and continue with whatever else works.
+        log("warn", `docs ingest failed: ${err}`)
+        event("ingest.docs.failed", { error: String(err) })
+      }
+    }
+    if (config.ingestProjectNotes) {
+      try {
+        const notes = await ingestProjectNotes(repo, root, {
+          maxBytes: config.notesMaxBytes,
+        })
+        if (notes.filesFound > 0) {
+          log("info", `prefill: project-notes found ${notes.filesFound} agent-instruction files`)
+          event("ingest.project-notes", { ...notes })
+        }
+      } catch (err) {
+        log("warn", `project-notes ingest failed: ${err}`)
+        event("ingest.project-notes.failed", { error: String(err) })
+      }
+    }
+    if (config.ingestTableHeaders) {
+      try {
+        const tables = await ingestTableHeaders(repo, root, {
+          maxFiles:  config.tablesMaxFiles,
+          maxXlsxMB: config.tablesMaxXlsxMB,
+          maxColumns: config.tablesMaxColumns,
+        })
+        if (tables.filesFound > 0) {
+          log(
+            "info",
+            `prefill: table-headers indexed for ${tables.filesFound} files ` +
+              `(formats: ${tables.formatsSupported.join(", ")})`,
+          )
+          event("ingest.tables", { ...tables })
+        }
+      } catch (err) {
+        log("warn", `tables ingest failed: ${err}`)
+        event("ingest.tables.failed", { error: String(err) })
+      }
+    }
+    if (config.ingestCrossRefs) {
+      try {
+        const xref = await ingestCrossRefs(repo, root, {
+          rarityThreshold: config.crossRefsRarityThreshold,
+          maxFiles:        config.crossRefsMaxFiles,
+          maxEdges:        config.crossRefsMaxEdges,
+        })
+        if (xref.edgesEmitted > 0) {
+          log(
+            "info",
+            `prefill: cross-refs indexed ${xref.edgesEmitted} edges ` +
+              `across ${xref.filesWalked} files ` +
+              `(${xref.definitionsExtracted} definitions extracted)`,
+          )
+          event("ingest.cross-refs", { ...xref, byEvidence: xref.byEvidence })
+        }
+      } catch (err) {
+        log("warn", `cross-refs ingest failed: ${err}`)
+        event("ingest.cross-refs.failed", { error: String(err) })
+      }
+    }
+
     const git = await ingestGitHistory(
       repo,
       root,
       config.gitHistoryDepth,
-      config.coChangeMaxCommits
+      config.coChangeMaxCommits,
+      config.coChangeMinOccurrences
     )
     const shapeSummary = Object.entries(git.shapeTagCounts)
       .sort((a, b) => b[1] - a[1])
@@ -1253,6 +1366,22 @@ function coerceUserConfig(options: unknown): UserConfig {
   num("skillMiningMinCluster")
   bool("ingestSessions")
   bool("enableCodeMap")
+  bool("installUsageSkill")
+  bool("ingestDocs")
+  bool("ingestProjectNotes")
+  bool("ingestTableHeaders")
+  bool("ingestCrossRefs")
+  num("crossRefsRarityThreshold")
+  num("crossRefsMaxFiles")
+  num("crossRefsMaxEdges")
+  num("docsMaxFiles")
+  num("docsBodyChars")
+  num("docsMaxHeadingLevel")
+  num("tablesMaxFiles")
+  num("tablesMaxXlsxMB")
+  num("tablesMaxColumns")
+  num("notesMaxBytes")
+  num("coChangeMinOccurrences")
   bool("enableNudgeHook")
   bool("adaptive")
   bool("enableSemanticSearch")
@@ -1276,7 +1405,23 @@ function resolveConfig(user: UserConfig): ResolvedConfig {
     minedSkillPrefix: "",
     skillMiningMinCluster: Math.max(2, user.skillMiningMinCluster ?? 3),
     ingestSessions: user.ingestSessions ?? true,
-    enableCodeMap: user.enableCodeMap ?? false,
+    enableCodeMap: user.enableCodeMap ?? true,
+    installUsageSkill: user.installUsageSkill ?? true,
+    ingestDocs: user.ingestDocs ?? true,
+    ingestProjectNotes: user.ingestProjectNotes ?? true,
+    ingestTableHeaders: user.ingestTableHeaders ?? true,
+    ingestCrossRefs: user.ingestCrossRefs ?? true,
+    crossRefsRarityThreshold: Math.max(1, Math.round(user.crossRefsRarityThreshold ?? 3)),
+    crossRefsMaxFiles:        Math.max(1, Math.round(user.crossRefsMaxFiles ?? 2000)),
+    crossRefsMaxEdges:        Math.max(1, Math.round(user.crossRefsMaxEdges ?? 10_000)),
+    docsMaxFiles:             Math.max(1, Math.round(user.docsMaxFiles ?? 200)),
+    docsBodyChars:            Math.max(40, Math.round(user.docsBodyChars ?? 240)),
+    docsMaxHeadingLevel:      Math.min(6, Math.max(1, Math.round(user.docsMaxHeadingLevel ?? 3))),
+    tablesMaxFiles:           Math.max(1, Math.round(user.tablesMaxFiles ?? 200)),
+    tablesMaxXlsxMB:          Math.max(0, user.tablesMaxXlsxMB ?? 50),
+    tablesMaxColumns:         Math.max(1, Math.round(user.tablesMaxColumns ?? 40)),
+    notesMaxBytes:            Math.max(256, Math.round(user.notesMaxBytes ?? 6144)),
+    coChangeMinOccurrences:   Math.max(1, Math.round(user.coChangeMinOccurrences ?? 3)),
     enableNudgeHook: user.enableNudgeHook ?? true,
     adaptive: user.adaptive ?? true,
     enableSemanticSearch: user.enableSemanticSearch ?? false,

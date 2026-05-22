@@ -477,8 +477,14 @@ interface UserConfig {
   skillsOutputDir?: string       // default ".opencode/skills"
   skillMiningMinCluster?: number // default 3
   ingestSessions?: boolean       // default true
-  enableCodeMap?: boolean        // default false — see Code map
-  enableNudgeHook?: boolean      // default true  — see Compatibility
+  enableCodeMap?: boolean        // default true  — tree-sitter signatures (since v0.0.4)
+  installUsageSkill?: boolean    // default true  — write a using-memory skill on first startup
+  ingestDocs?: boolean           // default true  — index docs/ headings as section pointers
+  ingestProjectNotes?: boolean   // default true  — index AGENTS.md, CLAUDE.md, .cursorrules, …
+  ingestTableHeaders?: boolean   // default true  — index CSV / TSV / XLSX column headers
+  ingestCrossRefs?: boolean      // default true  — grammar-agnostic cross-file edges
+  crossRefsRarityThreshold?: number // default 3 — max files a symbol can appear in to count
+  enableNudgeHook?: boolean      // default true  — see Coexisting plugins
   adaptive?: boolean             // default true  — see Adaptive sizing
   enableSemanticSearch?: boolean // default false — see Semantic search
   embeddingModel?: string        // default "Xenova/multilingual-e5-small"
@@ -595,8 +601,11 @@ non-git repo.
 ## Code map
 
 `enableCodeMap` turns on tree-sitter parsing of every source file
-into its per-file structural shape. It is **off by default** and is
-the one deliberate exception to the plugin's lightweight design:
+into its per-file structural shape. It is **on by default since
+v0.0.4** — set `enableCodeMap: false` to disable it (the grammar
+`.wasm` files are shipped regardless; the flag only controls whether
+the ingester runs). It is the one deliberate exception to the
+plugin's otherwise-lightweight design:
 
 - Covers **thirteen languages**. Ten are extracted as definition
   signatures (JavaScript, TypeScript, Python, Go, Rust, Java, C, C++,
@@ -1345,10 +1354,10 @@ have two plugins post-processing tool output, set
 `enableNudgeHook: false`. The nudge effect is then suppressed;
 **the hooks themselves remain registered** (they still run the
 code-map refresh). If the other plugin already does AST/LSP code
-intelligence, leaving `enableCodeMap` off avoids redundant work (and
-the grammar-wasm weight) while diane still covers the persistent
-memory store, git-structure signals, session ingestion, and skill
-mining.
+intelligence, setting `enableCodeMap: false` avoids redundant work
+(and the grammar-wasm parse overhead) while Diane still covers the
+persistent memory store, git-structure signals, session ingestion,
+cross-references, and skill mining.
 
 
 ## License

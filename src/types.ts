@@ -78,12 +78,126 @@ export interface UserConfig {
   ingestSessions?: boolean
   /**
    * Build a tree-sitter "code map" of file signatures (Aider-style).
-   * Default FALSE — this is the one heavyweight feature: it pulls in
-   * web-tree-sitter plus vendored grammar wasm (~10.3 MB across
-   * eleven languages). Opt in only if you want the agent to have the
-   * codebase's structural shape.
+   * Default `true` since v0.0.4. Web-tree-sitter plus vendored grammar
+   * wasm (~10.3 MB across thirteen languages) ships with the package
+   * regardless; this flag controls whether the ingester RUNS at
+   * startup. Set `false` to disable if you don't want structural
+   * signatures in the store.
    */
   enableCodeMap?: boolean
+  /**
+   * On first startup, write `<skillsOutputDir>/<prefix>using-memory/SKILL.md`
+   * so OpenCode surfaces a "call memory_recall first" instruction to
+   * the agent at session start. The plugin's nudge hook and tool
+   * descriptions already point the same way; this is the one-time
+   * upfront push.
+   *
+   * Defaults to `true` since v0.0.4. Set `false` to never install it.
+   * The file is written only when it does not already exist, so a
+   * user can edit it and the edits survive every subsequent startup
+   * — and a user can delete it (with this option still true) to opt
+   * out for the lifetime of that checkout.
+   */
+  installUsageSkill?: boolean
+  /**
+   * Walk `<root>/docs/` (and conventional root-level docs like
+   * CHANGELOG.md, CONTRIBUTING.md, ARCHITECTURE.md, …) and index
+   * each H1/H2/H3 heading as a recallable section pointer
+   * (`<path>:<line>  # <heading>` + first paragraph). Default `true`.
+   */
+  ingestDocs?: boolean
+  /**
+   * Index root-level agent-instruction files (AGENTS.md, CLAUDE.md,
+   * GEMINI.md, COPILOT.md, CONVENTIONS.md, .cursorrules,
+   * .windsurfrules, .clinerules) as project facts so the agent sees
+   * the repo's house rules within the first recall. Default `true`.
+   */
+  ingestProjectNotes?: boolean
+  /**
+   * Walk for `.csv`, `.tsv`, `.xlsx`, `.xls`, `.xlsm` files and index
+   * their column headers (first row only — never row data). XLSX/XLS
+   * files are handled via SheetJS, lazy-loaded only when a spreadsheet
+   * is actually encountered (projects with no spreadsheets pay no
+   * module-load cost). Default `true`.
+   */
+  ingestTableHeaders?: boolean
+  /**
+   * Run the grammar-agnostic cross-reference ingester: detects file-to-
+   * file connections in any language (Pascal, Ruby, Perl, Lua, …) and
+   * config DSLs (JSON / YAML / TOML) where one file references another
+   * by path. Multi-signal corroborated; filesystem-grounded signals
+   * (path resolves to existing file) emit edges alone, lexical signals
+   * (identifier mention) require an orthogonal corroboration before
+   * emitting. Default `true`.
+   */
+  ingestCrossRefs?: boolean
+  /**
+   * Rarity threshold for the grammar-agnostic cross-reference ingester.
+   * An identifier that is defined in *more than this many* files is
+   * treated as too generic to use as a corroboration signal. Reduce to
+   * tighten confidence (fewer, higher-quality edges); raise for large
+   * monorepos where the same class name spans many packages. Default 3.
+   */
+  crossRefsRarityThreshold?: number
+  /**
+   * Maximum number of files the cross-reference ingester walks in one
+   * prefill pass. Raise for monorepos with hundreds of thousands of
+   * files; lower for speed. Default `2000`.
+   */
+  crossRefsMaxFiles?: number
+  /**
+   * Hard cap on total cross-reference edges emitted per prefill pass.
+   * Lower values keep the memory store leaner; higher values give more
+   * complete coverage on dense codebases. Default `10000`.
+   */
+  crossRefsMaxEdges?: number
+  /**
+   * Maximum number of files the docs ingester walks in one pass
+   * (`docs/` tree + conventional root docs). Raise for documentation-
+   * heavy repos. Default `200`.
+   */
+  docsMaxFiles?: number
+  /**
+   * Number of characters of body text captured after each heading as
+   * context in the recall snippet. A longer value gives richer
+   * snippets at the cost of larger memory entries. Default `240`.
+   */
+  docsBodyChars?: number
+  /**
+   * Deepest heading level to index. `3` indexes H1–H3; `2` indexes
+   * only H1–H2; `4` or `5` captures deeper structure. Default `3`.
+   */
+  docsMaxHeadingLevel?: number
+  /**
+   * Maximum number of table files (CSV, TSV, XLSX) walked per prefill
+   * pass. Default `200`.
+   */
+  tablesMaxFiles?: number
+  /**
+   * Skip XLSX/XLS files larger than this, in megabytes. Very large
+   * spreadsheets are usually data dumps whose headers are rarely worth
+   * indexing. Set `0` to skip ALL spreadsheets. Default `50`.
+   */
+  tablesMaxXlsxMB?: number
+  /**
+   * Maximum number of column headers to list per table / sheet in the
+   * memory content. Wide tables beyond this threshold get a
+   * "(N more)" note. Default `40`.
+   */
+  tablesMaxColumns?: number
+  /**
+   * Maximum bytes of content read from each agent-instruction file
+   * (AGENTS.md, CLAUDE.md, .cursorrules, …). Teams with detailed
+   * instructions should raise this. Default `6144` (6 KB).
+   */
+  notesMaxBytes?: number
+  /**
+   * Minimum number of times two files must appear in the same commit
+   * before a co-change edge is recorded. Lower values add more
+   * connections on new or small repos; higher values keep the graph
+   * tight. Default `3`.
+   */
+  coChangeMinOccurrences?: number
   /**
    * The recall-first nudge: a tool.execute.before/after hook pair that
    * appends ONE reminder to a discovery tool's output if the agent
@@ -173,6 +287,23 @@ export interface ResolvedConfig {
   skillMiningMinCluster: number
   ingestSessions: boolean
   enableCodeMap: boolean
+  installUsageSkill: boolean
+  ingestDocs: boolean
+  ingestProjectNotes: boolean
+  ingestTableHeaders: boolean
+  ingestCrossRefs: boolean
+  /** See `UserConfig.crossRefsRarityThreshold`. */
+  crossRefsRarityThreshold: number
+  crossRefsMaxFiles: number
+  crossRefsMaxEdges: number
+  docsMaxFiles: number
+  docsBodyChars: number
+  docsMaxHeadingLevel: number
+  tablesMaxFiles: number
+  tablesMaxXlsxMB: number
+  tablesMaxColumns: number
+  notesMaxBytes: number
+  coChangeMinOccurrences: number
   enableNudgeHook: boolean
   adaptive: boolean
   enableSemanticSearch: boolean

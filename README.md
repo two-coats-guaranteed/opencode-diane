@@ -15,10 +15,11 @@ record of what your coding agent learns about a codebase.
 
 ## TL;DR for a decision-maker
 
-- **What it is.** A hierarchical, BM25-ranked memory store for any git
-  repository, in any language. It pre-fills itself from git history
-  and project files; the agent reaches it through nine `memory_*`
-  tools.
+- **What it is.** A hierarchical, BM25-ranked memory layer for any git
+  repository. It pre-fills itself from git history, project files,
+  docs, agent-instruction files (AGENTS.md, CLAUDE.md, .cursorrules),
+  table column headers, and grammar-agnostic cross-file edges; the
+  agent reaches it through nine `memory_*` tools.
 - **The problem it solves.** An agent re-greps and re-reads the same
   files every session. One bounded `memory_recall` replaces many raw
   discovery calls.
@@ -34,18 +35,26 @@ record of what your coding agent learns about a codebase.
   every signal is a physical fact (files touched, lines ±, co-change).
   It behaves identically on a `wip` / `.` / `更新` history and a
   pristine one.
-- **What it costs.** Core plugin: ~77 KB plus one small dependency; a
-  few hundred MB of RAM for a large store. The optional code map adds
-  ~16 MB of vendored grammar files.
+- **Languages.** Code map covers 13 tree-sitter grammars. The
+  grammar-agnostic cross-reference ingester extends this to 30+
+  languages (Pascal, Ruby, Perl, Elixir, Verilog, VHDL, COBOL,
+  Fortran, Solidity, Smalltalk, Racket, Common Lisp, Vim script, and
+  more) plus low-code DSLs (GitHub Actions, k8s, Terraform, n8n).
+- **What it costs.** ~1.6 MB packed, ~17 MB unpacked (includes
+  tree-sitter grammar `.wasm` files and SheetJS for spreadsheet
+  headers). A few hundred MB RAM for a large store. Dependencies:
+  `@opencode-ai/plugin`, `web-tree-sitter`, `xlsx`.
 - **What it is not.** Not an LLM, not an unbounded archive (a
   configurable disk budget, 50 MB by default, ages out least-used
-  facts), not a replacement for `AGENTS.md`. Not a vector store by
-  default — lexical BM25 — though cross-lingual semantic search is
-  available as an explicit opt-in.
-- **Maturity.** 444 assertions across 15 test suites, ~90 % line
-  coverage; verified against the documented plugin contract and
-  dry-run on real repos in 10 languages. Not yet run end-to-end inside
-  a live OpenCode *server* — see the WIKI.
+  facts), not a replacement for `AGENTS.md` (though we *read*
+  AGENTS.md and index its contents). Not a vector store by default —
+  lexical BM25 — though cross-lingual semantic search is available as
+  an explicit opt-in.
+- **Maturity.** 618 assertions across 22 test suites, ~93 % line
+  coverage; verified against the documented plugin contract in 30+
+  languages and against live builds with oh-my-opencode and caveman
+  as coexisting plugins. Not yet run end-to-end inside a live OpenCode
+  *server* — see the WIKI.
 
 **The full design — how the memory is structured, how retrieval works,
 what happens without git, scaling numbers, how it compares to other
@@ -66,6 +75,37 @@ decision-maker*.
 | `memory_ingest_sessions` | Pull task + tool-trace summaries from past OpenCode sessions. |
 | `memory_mine_skills` | Cluster memories by subject into `SKILL.md` files. Runs in the background. |
 | `memory_skill` | List the mined skill files, or load one into the conversation — so a skill mined this session is usable now, no restart. |
+
+## Install
+
+```bash
+npm install opencode-diane
+```
+
+Then in `opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["opencode-diane"]
+}
+```
+
+Open OpenCode in any git repository, in any language. The plugin
+loads, runs prefill in the background, registers all nine tools, and
+the agent can use them immediately. If the directory is neither a git
+repo nor has a recognised manifest, the plugin logs one idle line and
+does nothing.
+
+The optional Aider-style code map is **off by default** because its
+tree-sitter grammars add ~16 MB to the install. To enable it, use the
+`[name, options]` tuple form and restart OpenCode:
+
+```json
+{
+  "plugin": [["opencode-diane", { "enableCodeMap": true }]]
+}
+```
 
 ### Install from a local clone
 
@@ -104,12 +144,18 @@ interface UserConfig {
   skillsOutputDir?: string       // default ".opencode/skills"
   skillMiningMinCluster?: number // default 3
   ingestSessions?: boolean       // default true
-  enableCodeMap?: boolean        // default false  (see WIKI: Code map)
-  enableNudgeHook?: boolean      // default true   (see WIKI: Compatibility)
-  adaptive?: boolean             // default true   (see WIKI: Adaptive sizing)
-  enableSemanticSearch?: boolean // default false  (see WIKI: Semantic search)
+  enableCodeMap?: boolean        // default true  (see WIKI: Code map)
+  installUsageSkill?: boolean    // default true  — write a using-memory skill on first startup
+  ingestDocs?: boolean           // default true  — index docs/ headings as section pointers
+  ingestProjectNotes?: boolean   // default true  — index AGENTS.md, CLAUDE.md, .cursorrules, …
+  ingestTableHeaders?: boolean   // default true  — index CSV/TSV/XLSX column headers
+  ingestCrossRefs?: boolean      // default true  — grammar-agnostic cross-file edge discovery
+  crossRefsRarityThreshold?: number // default 3 — max files a symbol can appear in to count
+  enableNudgeHook?: boolean      // default true  (see WIKI: Compatibility)
+  adaptive?: boolean             // default true  (see WIKI: Adaptive sizing)
+  enableSemanticSearch?: boolean // default false (see WIKI: Semantic search)
   embeddingModel?: string        // default "Xenova/multilingual-e5-small"
-  personalizedPageRank?: boolean // default false  (co-change ranking; see WIKI)
+  personalizedPageRank?: boolean // default false (co-change ranking; see WIKI)
 }
 ```
 

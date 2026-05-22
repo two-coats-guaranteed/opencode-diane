@@ -1,6 +1,6 @@
 {
   "name": "opencode-diane",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "OpenCode plugin: hierarchical, token-efficient memory for any git repository. Convention-free — pre-fills from git diff-structure and project files, no embeddings, no LLM, no commit-message parsing. Includes skill mining.",
   "keywords": [
     "opencode",
@@ -54,7 +54,8 @@
   },
   "dependencies": {
     "@opencode-ai/plugin": ">=1.14.0",
-    "web-tree-sitter": "0.25.10"
+    "web-tree-sitter": "0.25.10",
+    "xlsx": "^0.18.5"
   },
   "peerDependencies": {
     "@huggingface/transformers": "^4.2.0"

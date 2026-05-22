@@ -119,7 +119,8 @@ export async function ingestGitHistory(
   repo: MemoryRepository,
   root: string,
   depth: number,
-  coChangeMaxCommits = Infinity
+  coChangeMaxCommits = Infinity,
+  coChangeMinOccurrences = COCHANGE_MIN_TIMES
 ): Promise<GitIngestResult> {
   const result: GitIngestResult = {
     scanned: 0,
@@ -192,7 +193,7 @@ export async function ingestGitHistory(
     }
     const pairs: Array<{ a: string; b: string; n: number }> = []
     for (const [k, n] of pairCounts) {
-      if (n < COCHANGE_MIN_TIMES) continue
+      if (n < coChangeMinOccurrences) continue
       const sep = k.indexOf("\u0000")
       pairs.push({ a: k.slice(0, sep), b: k.slice(sep + 1), n })
     }
