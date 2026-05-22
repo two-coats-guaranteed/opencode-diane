@@ -98,9 +98,8 @@ the agent can use them immediately. If the directory is neither a git
 repo nor has a recognised manifest, the plugin logs one idle line and
 does nothing.
 
-The optional Aider-style code map is **off by default** because its
-tree-sitter grammars add ~16 MB to the install. To enable it, use the
-`[name, options]` tuple form and restart OpenCode:
+To enable some feature disabled by default, use the `[name, options]` 
+tuple form and restart OpenCode:
 
 ```json
 {
