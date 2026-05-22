@@ -186,6 +186,29 @@ the model downloads on first use. When off — the default — no model is
 downloaded, the dependency is never loaded, and retrieval is the
 unchanged lexical path. See *Semantic search* in the WIKI.
 
+### Fine-grained tuning
+
+Most users never set these — the defaults cover typical repos. They
+exist for monorepos, documentation-heavy projects, and locked-down
+environments where every walk needs an explicit ceiling. All numeric
+limits are clamped to a safe minimum and rounded; garbage input in
+`opencode.json` never breaks the plugin.
+
+| Option | Default | What it does |
+|---|---|---|
+| `docsMaxFiles` | `200` | Cap on `.md` / `.markdown` files walked under `docs/` plus conventional root docs (CHANGELOG, CONTRIBUTING, ARCHITECTURE, ROADMAP, …). |
+| `docsBodyChars` | `240` | Characters of body text captured after each heading as the recall snippet. |
+| `docsMaxHeadingLevel` | `3` | Deepest heading level indexed (`3` = H1–H3). Clamped to `[1, 6]`. |
+| `notesMaxBytes` | `6144` | Maximum bytes read from each agent-instruction file (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`, …). |
+| `tablesMaxFiles` | `200` | Cap on table files (CSV / TSV / XLSX / XLS) walked per prefill pass. |
+| `tablesMaxXlsxMB` | `50` | Skip XLSX/XLS files larger than this (in MB). Set `0` to skip all spreadsheets. |
+| `tablesMaxColumns` | `40` | Maximum column headers listed per table/sheet. Wider tables get a `(N more)` note. |
+| `crossRefsMaxFiles` | `2000` | Cap on files the cross-reference ingester walks per prefill. Raise for monorepos. |
+| `crossRefsMaxEdges` | `10000` | Hard cap on cross-reference edges emitted per pass. |
+| `coChangeMinOccurrences` | `3` | Minimum commits in which two files must co-change before a co-change edge is recorded. |
+| `codeMapMaxFiles` | adaptive (`1500` / `4000` / `10000`) | Cap on source files the code-map ingester parses per pass. With `adaptive: true` (the default), this is sized at startup by the small / medium / large tier. Setting it explicitly *overrides the adaptive choice*. |
+| `coChangeMaxCommits` | `5000` | Cap on git commits the co-change graph builder scans. Adaptive sizing keeps this uniform across tiers in the current implementation; only `codeMapMaxFiles` and `gitHistoryDepth` vary by tier. |
+
 ## Learn more
 
 [WIKI.md](./WIKI.md) covers everything else, including:
