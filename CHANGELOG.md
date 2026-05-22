@@ -7,6 +7,65 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 on the understanding that the public surface for SemVer purposes is the
 tool list (`memory_*`) and the documented `UserConfig` options.
 
+## [0.0.5] — 2026-05-22
+
+### Added
+- **Live-session activity recording (`recordSessionActivity`, default
+  `true`).** The current session's file edits and bash commands are
+  now rolled up into a single memory under `session-trace` →
+  `live:${sessionId}`, upserted in place after each event. Lets the
+  current session recall what it has already touched without scanning
+  the OpenCode SDK, and pre-seeds the trace for the moment this
+  session becomes "past" to a successor. The memory is not pinned —
+  transient state should be evictable. JSONL logs are unchanged; this
+  is a recall surface, not an audit log. New module
+  `src/ingest/live-session.ts` (~160 lines), bounded by
+  `MAX_CONTENT_BYTES` and per-buffer caps so a long session can't
+  swell the store.
+- **Bash file-change tracking (`bashFileTrackingMaxFiles`,
+  default `20`).** After every `bash` tool call the plugin runs
+  `git status --porcelain` and refreshes the code-map for each
+  touched file (modified or untracked, deletions skipped). Closes the
+  long-standing "bash-driven changes are a known gap" caveat —
+  `git checkout other-branch`, `npm run format`, `cargo fmt --all`,
+  and similar now keep the code map fresh. Capped to bound post-hook
+  latency on mass-checkout situations; raise or set to `0` to
+  disable.
+- **Auto git re-ingest on HEAD movement (`autoReingestGitOnHeadChange`,
+  default `true`).** After every `bash` call the plugin polls
+  `git rev-parse HEAD`; if HEAD moved (pull / merge / rebase /
+  checkout / reset), it queues a background re-ingest of git
+  history. Idempotent — already-known commits are skipped via
+  `insertIfMissing`. Concurrent triggers coalesce (one re-ingest at a
+  time; further detections re-arm the flag for the next poll). Closes
+  the post-merge invisibility gap surfaced by the v0.0.4 verdict.
+- **`memory_ingest_git` tool (the 10th).** Explicit on-demand
+  re-ingest of git history for cases the auto-detect can't cover
+  (a `git fetch` without merge that nonetheless brings new commits
+  via another mechanism). Returns a human-readable summary of new
+  commit / co-change / churn / recency memories added.
+- New helpers in `src/utils/shell.ts`: `currentHead(cwd)` (returns
+  the HEAD SHA or null) and `changedFilesInWorktree(cwd)` (parses
+  `git status --porcelain` into a file list, handling renames,
+  deletions, and C-quoted paths). Both are non-throwing — they
+  return safe empty values on non-git directories or git failures.
+
+### Changed
+- The tool count is now **ten** (was nine in v0.0.4). The new tool is
+  additive — existing tool semantics are unchanged.
+- Live-session memories share the `session-trace` category with past
+  sessions, distinguished by subject prefix: `task:` / `trace:` for
+  past, `live:` for current.
+
+### Notes
+- All three new behaviours default ON. Set the corresponding config
+  to `false` (or `0` for `bashFileTrackingMaxFiles`) to opt out. The
+  JSONL audit log captures the same events regardless.
+- Test count: **674 assertions across 24 test suites** (up from
+  641/23 in v0.0.4). New suite `tests/live-session.test.ts` adds
+  33 assertions; two pre-existing plugin-test assertions and one
+  smoke-script assertion were updated from "nine tools" to "ten".
+
 ## [0.0.4] — 2026-05-22
 
 ### Added
@@ -84,9 +143,8 @@ tool list (`memory_*`) and the documented `UserConfig` options.
 First public preview release.
 
 ### Added
-- Nine `memory_*` tools (`recall`, `remember`, `status`, `code_map`,
-  `outline`, `ingest_sessions`, `mine_skills`, `skill`,
-  `ingest_code_health`).
+- Nine `memory_*` tools (`recall`, `remember`, `snapshot`, `status`,
+  `code_map`, `outline`, `ingest_sessions`, `mine_skills`, `skill`).
 - BM25 lexical recall with one-hop co-change boosting; opt-in
   Personalized PageRank for multi-hop recall (`personalizedPageRank`).
 - Tree-sitter code-map across 10 languages plus JSON/CSS/HTML
@@ -101,7 +159,6 @@ First public preview release.
   truth, no second place to update.
 - Defensive legacy-JSON → SQLite migration that never crashes plugin
   startup even when another plugin is contending for the database.
-- `QUICKSTART.md` for the impatient; `WIKI.md` for the curious.
 
 ### Reliability
 - `MemoryRepository.load` accepts an `onMigrationError` callback so a

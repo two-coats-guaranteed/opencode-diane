@@ -1,7 +1,7 @@
 {
   "name": "opencode-diane",
-  "version": "0.0.4",
-  "description": "OpenCode plugin: hierarchical, token-efficient memory for any git repository. Convention-free — pre-fills from git diff-structure and project files, no embeddings, no LLM, no commit-message parsing. Includes skill mining.",
+  "version": "0.0.5",
+  "description": "OpenCode plugin: hierarchical, token-efficient memory for any git repository. Convention-free — pre-fills from git diff-structure and project files, no LLM at the core, no commit-message parsing. Optional cross-lingual semantic search; skill mining.",
   "keywords": [
     "opencode",
     "opencode-plugin",
@@ -35,6 +35,7 @@
     "grammars",
     "README.md",
     "WIKI.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
@@ -42,7 +43,7 @@
     "lint": "eslint src tests",
     "clean": "rm -rf dist coverage",
     "prepublishOnly": "bun run clean && bun run build",
-    "test": "bun tests/store.test.ts && bun tests/search.test.ts && bun tests/ingest.test.ts && bun tests/mining.test.ts && bun tests/sessions.test.ts && bun tests/code-health.test.ts && bun tests/code-map.test.ts && bun tests/session-snapshot.test.ts && bun tests/adaptive.test.ts && bun tests/file-log.test.ts && bun tests/token-savings.test.ts && bun tests/skill-activation.test.ts && bun tests/scaling.test.ts && bun tests/semantic.test.ts && bun tests/ppr.test.ts && bun tests/plugin.test.ts",
+    "test": "bun scripts/run-tests.mjs",
     "smoke": "bun scripts/smoke.mjs",
     "check:size": "bun scripts/check-size.mjs",
     "test:coverage": "bun test --coverage",

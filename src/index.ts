@@ -8,14 +8,19 @@
  * summarised by format — JSON/TOML/YAML/etc., never by language
  * semantics). Ingests past OpenCode sessions on demand; mines
  * reusable SKILL.md files from recurring memory clusters.
- * No embeddings, no LLM, no convention assumptions.
+ * No LLM at the core, no convention assumptions; optional opt-in
+ * cross-lingual semantic search via a small multilingual e5 model.
  *
  * Tools exposed to the agent:
  *   memory_recall          — hierarchical search over the store
  *   memory_remember        — add an explicit note
+ *   memory_snapshot        — record this session's understanding for resume by a later session
  *   memory_outline         — table of contents (counts per category)
- *   memory_status          — store size, hit stats
+ *   memory_status          — store size, hit stats, plugin version
+ *   memory_code_map        — Aider-style tree-sitter signature map
+ *   memory_skill           — read one mined skill by name
  *   memory_ingest_sessions — pull facts from past OpenCode sessions
+ *   memory_ingest_git      — re-scan git history (pull/merge/rebase)
  *   memory_mine_skills     — turn clusters into .opencode/skills/<x>/SKILL.md (background)
  */
 
@@ -41,11 +46,12 @@ import { createE5Embedder } from "./search/e5-embedder.js"
 import { DEFAULT_EMBEDDING_MODEL, type Embedder } from "./search/embedder.js"
 import { VectorStore } from "./store/vector-store.js"
 import { embedMissingMemories } from "./search/embed-pass.js"
-import { isGitRepo } from "./utils/shell.js"
+import { isGitRepo, currentHead, changedFilesInWorktree } from "./utils/shell.js"
 import { createFileLogger, truncateForLog } from "./utils/file-log.js"
 import { detectPeerPlugins } from "./utils/peer-detection.js"
 import { installUsageSkill } from "./utils/usage-skill.js"
 import { mineSkills, readMinedSkills } from "./mining/skill-miner.js"
+import { LiveSessionRecorder } from "./ingest/live-session.js"
 import type { Category, ResolvedConfig, UserConfig } from "./types.js"
 
 const SERVICE = "opencode-diane"
@@ -239,6 +245,7 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
     "memory_code_map",
     "memory_outline",
     "memory_ingest_sessions",
+    "memory_ingest_git",
     "memory_remember",
     "memory_mine_skills",
     "memory_skill",
@@ -263,8 +270,27 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
   const FILE_WRITE_TOOLS = new Set(["write", "edit", "patch"])
   // callID → the path a pending write/edit is about to change, recorded
   // in the before-hook and consumed in the after-hook (once the file is
-  // actually on disk in its new form).
+  // actually on disk in its new form). Bounded to PENDING_MAP_CAP — the
+  // matching after-hook normally fires for every before, but a rare
+  // tool-execution abort or a plugin reload mid-tool can leave orphan
+  // entries; FIFO eviction at the cap keeps the map size finite over
+  // long-running sessions.
+  const PENDING_MAP_CAP = 256
   const pendingEditPaths = new Map<string, string>()
+
+  /**
+   * Insert into a bounded Map keyed by callID, evicting the oldest
+   * entry when the cap is exceeded. JavaScript's `Map` preserves
+   * insertion order, so iterating keys() yields oldest-first.
+   */
+  function setBoundedPending(m: Map<string, string>, k: string, v: string): void {
+    m.set(k, v)
+    while (m.size > PENDING_MAP_CAP) {
+      const oldest = m.keys().next().value
+      if (oldest === undefined) break
+      m.delete(oldest)
+    }
+  }
 
   // Re-index one file's code-map after the agent edits it. Defensive:
   // a freshness refresh must never throw into a tool call.
@@ -414,7 +440,104 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
     // "preserved" is silent — that's the steady state once installed.
   }
 
-  // ── 4. Tools ───────────────────────────────────────────────────────
+  // ── 4. Live session reflection + git change detection ─────────────
+  // Three pieces of state added in this version, all defensive,
+  // none capable of breaking a tool call:
+  //
+  //   (a) LiveSessionRecorder rolls up this session's file edits and
+  //       bash commands into ONE memory under `live:${sessionId}`,
+  //       updated after each event. Lets the current session recall
+  //       what it has already touched, and pre-seeds the trace for
+  //       successor sessions.
+  //
+  //   (b) lastKnownHead is the git HEAD commit SHA observed at the
+  //       last check. After each `bash` call we poll it again; a
+  //       mismatch means a pull / merge / rebase / checkout happened
+  //       in the working tree and the git ingester needs to run again.
+  //
+  //   (c) gitReingestInFlight coalesces concurrent triggers. If three
+  //       bash commands all move HEAD before the first re-ingest
+  //       finishes, only one re-ingest pass actually runs; subsequent
+  //       detections see the flag and exit. The next post-bash poll
+  //       picks up where the previous pass left off.
+  //
+  // `pendingBashCommands` mirrors the existing `pendingEditPaths` —
+  // the before-hook stashes the bash command string keyed by callID
+  // and the after-hook consumes it to feed the recorder. Missing
+  // entries are silently ignored.
+  const sessionIdForRecorder =
+    (ctx as unknown as { sessionID?: string }).sessionID ??
+    `unknown-${Date.now()}`
+  const liveRecorder = config.recordSessionActivity
+    ? new LiveSessionRecorder(repo, sessionIdForRecorder)
+    : undefined
+  const pendingBashCommands = new Map<string, string>()
+  let lastKnownHead: string | null = null
+  let gitReingestInFlight = false
+  // Seed the HEAD baseline asynchronously — no need to block startup,
+  // the value only matters once a bash command has executed.
+  if (config.autoReingestGitOnHeadChange) {
+    void currentHead(root).then((h) => { lastKnownHead = h })
+  }
+
+  /**
+   * Check whether HEAD has moved since the last poll; if so, queue a
+   * background git re-ingest (idempotent — already-known commits are
+   * skipped). Coalesces concurrent triggers via `gitReingestInFlight`.
+   * Best-effort: any error is logged and swallowed.
+   */
+  async function reingestGitIfHeadMoved(): Promise<void> {
+    if (!config.autoReingestGitOnHeadChange) return
+    if (gitReingestInFlight) return
+    try {
+      const head = await currentHead(root)
+      if (head === null || head === lastKnownHead) return
+      const previous = lastKnownHead
+      lastKnownHead = head
+      gitReingestInFlight = true
+      log(
+        "info",
+        `git: HEAD moved ${(previous ?? "?").slice(0, 7)} → ${head.slice(0, 7)} — re-ingesting`,
+      )
+      event("git.head.changed", { from: previous, to: head })
+      // Fire-and-forget — we don't want to block the next tool call on
+      // a potentially-multi-second git history scan.
+      void (async () => {
+        try {
+          const git = await ingestGitHistory(
+            repo,
+            root,
+            config.gitHistoryDepth,
+            config.coChangeMaxCommits,
+            config.coChangeMinOccurrences,
+          )
+          repo.applyEviction(config)
+          await repo.forceFlush()
+          log(
+            "info",
+            `git: re-ingest after HEAD move — scanned ${git.scanned} commits, ` +
+              `${git.commitMemories} commit memories, ${git.coChangeMemories} co-change`,
+          )
+          event("ingest.git.reingested", {
+            trigger: "head-change",
+            scanned: git.scanned,
+            commitMemories: git.commitMemories,
+            coChangeMemories: git.coChangeMemories,
+          })
+        } catch (err) {
+          log("warn", `git re-ingest after HEAD move failed: ${err}`)
+          event("ingest.git.reingested.failed", { error: String(err) })
+        } finally {
+          gitReingestInFlight = false
+        }
+      })()
+    } catch (err) {
+      log("warn", `git HEAD check failed: ${err}`)
+      gitReingestInFlight = false
+    }
+  }
+
+  // ── 5. Tools ───────────────────────────────────────────────────────
   return {
     tool: {
       memory_recall: tool({
@@ -804,6 +927,71 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
         },
       }),
 
+      memory_ingest_git: tool({
+        description:
+          "Re-scan git history for new commits since the session started. Useful after " +
+          "a 'git pull' / 'git merge' / 'git rebase' where new commits arrived while this " +
+          "session was running — the prefill scan only sees what existed at startup. " +
+          "Idempotent: already-known commits are skipped (deduped by content hash), so " +
+          "only the new ones get added. The plugin also auto-runs this in the background " +
+          "when it detects HEAD moved as a side effect of a bash call; this tool is the " +
+          "explicit-control version, e.g. after a fetch-only operation that did not move " +
+          "HEAD but where you nonetheless know history advanced.",
+        args: {},
+        async execute() {
+          const t0 = performance.now()
+          const summary: Record<string, unknown> = {}
+          let error: string | undefined
+          try {
+            // Refuse cleanly on non-git roots — `ingestGitHistory` already
+            // handles this internally (returns zero counts), but a direct
+            // upfront message is clearer for the agent than a silent zero.
+            if (!(await isGitRepo(root))) {
+              summary.skipped = "not-a-git-repo"
+              return "not a git repository — nothing to ingest"
+            }
+            const git = await ingestGitHistory(
+              repo,
+              root,
+              config.gitHistoryDepth,
+              config.coChangeMaxCommits,
+              config.coChangeMinOccurrences,
+            )
+            repo.applyEviction(config)
+            await repo.forceFlush()
+            // Refresh the cached HEAD so the next auto-trigger compares
+            // against the value we just ingested at.
+            try {
+              const head = await currentHead(root)
+              if (head !== null) lastKnownHead = head
+            } catch {
+              /* HEAD refresh is best-effort */
+            }
+            summary.scanned = git.scanned
+            summary.commitMemories = git.commitMemories
+            summary.coChangeMemories = git.coChangeMemories
+            summary.churnMemories = git.churnMemories
+            summary.recencyMemories = git.recencyMemories
+            event("ingest.git.reingested", {
+              trigger: "explicit-tool",
+              scanned: git.scanned,
+              commitMemories: git.commitMemories,
+            })
+            return (
+              `re-ingested git history: scanned ${git.scanned} commits → ` +
+              `${git.commitMemories} commit memories (new entries only — ` +
+              `already-known commits skipped), ${git.coChangeMemories} co-change pairs, ` +
+              `${git.churnMemories} churn flags, ${git.recencyMemories} recency markers.`
+            )
+          } catch (e) {
+            error = e instanceof Error ? e.message : String(e)
+            throw e
+          } finally {
+            recordToolCall("memory_ingest_git", {}, t0, summary, error)
+          }
+        },
+      }),
+
       memory_mine_skills: tool({
         description:
           "Mine project memory for reusable skill files. Clusters memories by subject; " +
@@ -1059,7 +1247,27 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
         if (FILE_WRITE_TOOLS.has(name)) {
           const fp = output?.args?.filePath
           if (typeof fp === "string" && fp.length > 0) {
-            pendingEditPaths.set(input?.callID ?? "_", fp)
+            setBoundedPending(pendingEditPaths, input?.callID ?? "_", fp)
+          }
+        }
+      } catch {
+        /* bookkeeping must never break a tool call */
+      }
+      // (1b) Stash the bash command string so the after-hook can record
+      //      it to the live-session memory. The OpenCode bash tool's
+      //      arg key is `command`; we also check a couple of common
+      //      alternatives (`cmd`, `script`) defensively — an
+      //      unrecognised key means the bash recording is skipped for
+      //      that call, never an error.
+      try {
+        if (name === "bash" && liveRecorder) {
+          const a = output?.args ?? {}
+          const cmd =
+            (typeof a.command === "string" ? a.command : undefined) ??
+            (typeof a.cmd === "string" ? a.cmd : undefined) ??
+            (typeof a.script === "string" ? a.script : undefined)
+          if (typeof cmd === "string" && cmd.length > 0) {
+            setBoundedPending(pendingBashCommands, input?.callID ?? "_", cmd)
           }
         }
       } catch {
@@ -1089,9 +1297,81 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
         if (fp !== undefined) {
           pendingEditPaths.delete(key)
           await refreshCodeMapAfterEdit(fp)
+          // (1a) Live session recording — feed the recorder the edit.
+          //      Wrapped — a failed live recording is not worth
+          //      interrupting the agent. Recorder.flush() upserts ONE
+          //      memory under `live:${sessionId}`, idempotent on
+          //      subject, so frequent flushing is cheap and safe.
+          if (liveRecorder) {
+            try {
+              liveRecorder.recordFileEdit(fp, name)
+              liveRecorder.flush()
+            } catch {
+              /* live-trace recording is best-effort */
+            }
+          }
         }
       } catch {
         /* a stale-index refresh must never break a tool call */
+      }
+      // (1b) Bash-specific post-processing: detect what files the shell
+      //      command actually touched (via `git status --porcelain`),
+      //      refresh the code-map for each up to the configured cap,
+      //      and check whether HEAD moved (pull/merge/rebase/checkout)
+      //      — if so, queue a background git re-ingest.
+      if (name === "bash") {
+        // Record the bash command itself into the live trace.
+        try {
+          const key = input?.callID ?? "_"
+          const cmd = pendingBashCommands.get(key)
+          pendingBashCommands.delete(key)
+          if (cmd !== undefined && liveRecorder) {
+            try {
+              liveRecorder.recordBash(cmd)
+              liveRecorder.flush()
+            } catch {
+              /* live-trace recording is best-effort */
+            }
+          }
+        } catch {
+          /* bash command extraction is best-effort */
+        }
+        // Refresh code-map for files the bash command modified.
+        try {
+          if (config.bashFileTrackingMaxFiles > 0 && config.enableCodeMap) {
+            const changed = await changedFilesInWorktree(root)
+            if (changed.length > 0) {
+              const toRefresh = changed.slice(0, config.bashFileTrackingMaxFiles)
+              const skipped = changed.length - toRefresh.length
+              for (const f of toRefresh) {
+                // refreshCodeMapAfterEdit is already defensively wrapped.
+                await refreshCodeMapAfterEdit(f)
+                if (liveRecorder) {
+                  try { liveRecorder.recordFileEdit(f, "bash") }
+                  catch { /* best-effort */ }
+                }
+              }
+              if (liveRecorder) {
+                try { liveRecorder.flush() } catch { /* best-effort */ }
+              }
+              if (skipped > 0) {
+                log(
+                  "debug",
+                  `bash post-hook: ${toRefresh.length} file(s) re-indexed, ` +
+                    `${skipped} skipped (over bashFileTrackingMaxFiles=${config.bashFileTrackingMaxFiles})`,
+                )
+              }
+            }
+          }
+        } catch {
+          /* bash post-hook scan is best-effort */
+        }
+        // Detect HEAD movement and queue git re-ingest if needed.
+        try {
+          await reingestGitIfHeadMoved()
+        } catch {
+          /* HEAD detection is best-effort */
+        }
       }
       // (2) Nudge.
       if (config.enableNudgeHook) {
@@ -1389,6 +1669,9 @@ function coerceUserConfig(options: unknown): UserConfig {
   bool("enableSemanticSearch")
   str("embeddingModel")
   bool("personalizedPageRank")
+  bool("recordSessionActivity")
+  num("bashFileTrackingMaxFiles")
+  bool("autoReingestGitOnHeadChange")
   return cfg
 }
 
@@ -1429,6 +1712,9 @@ function resolveConfig(user: UserConfig): ResolvedConfig {
     enableSemanticSearch: user.enableSemanticSearch ?? false,
     embeddingModel: user.embeddingModel ?? DEFAULT_EMBEDDING_MODEL,
     personalizedPageRank: user.personalizedPageRank ?? false,
+    recordSessionActivity: user.recordSessionActivity ?? true,
+    bashFileTrackingMaxFiles: Math.max(0, Math.round(user.bashFileTrackingMaxFiles ?? 20)),
+    autoReingestGitOnHeadChange: user.autoReingestGitOnHeadChange ?? true,
     explicitKeys,
     // Size-derived knobs — these are the fixed (medium-tier) defaults;
     // applyAdaptiveTuning overwrites them from the measured repo

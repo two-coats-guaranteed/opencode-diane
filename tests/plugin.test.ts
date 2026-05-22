@@ -73,8 +73,8 @@ async function main(): Promise<void> {
   const nodeHooks = await OpencodeDiane(mockCtx(nodeRoot, nodeLogs))
   await new Promise((r) => setTimeout(r, 400))
   assert(
-    nodeHooks.tool !== undefined && Object.keys(nodeHooks.tool).length === 9,
-    "Node project (manifest, no git) activates with all nine tools"
+    nodeHooks.tool !== undefined && Object.keys(nodeHooks.tool).length === 10,
+    "Node project (manifest, no git) activates with all ten tools"
   )
   await rm(nodeRoot, { recursive: true, force: true })
 
@@ -273,8 +273,8 @@ async function main(): Promise<void> {
     "enableNudgeHook:false → nudge is suppressed even after discovery calls"
   )
   assert(
-    offHooks.tool !== undefined && Object.keys(offHooks.tool).length === 9,
-    "enableNudgeHook:false still registers all nine tools"
+    offHooks.tool !== undefined && Object.keys(offHooks.tool).length === 10,
+    "enableNudgeHook:false still registers all ten tools"
   )
 
   // default (no options) keeps the hooks on

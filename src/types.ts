@@ -285,6 +285,50 @@ export interface UserConfig {
    * fully traceable. See WIKI: "How it compares".
    */
   personalizedPageRank?: boolean
+  /**
+   * Record the current session's activity (file edits + bash commands)
+   * as a single rolling memory under `session-trace` →
+   * `live:${sessionId}`. Lets the current session recall what it has
+   * already touched without scanning the OpenCode SDK, and pre-seeds
+   * the trace for the moment this session becomes "past" to a
+   * successor session. Default TRUE.
+   *
+   * Set FALSE to opt out of recording — the JSONL log still captures
+   * the same events for offline inspection. Disabling this is mostly
+   * useful in tests or when running against very locked-down stores
+   * where any extra write is unwelcome.
+   */
+  recordSessionActivity?: boolean
+  /**
+   * Maximum number of files re-indexed after a single `bash` tool
+   * call. After a `bash` call the plugin runs `git status` to find
+   * what changed in the working tree and refreshes the code-map for
+   * each touched file. A bash command that triggers a branch switch
+   * or large reformat can change thousands of files at once; this cap
+   * keeps post-hook latency bounded. Default `20` — enough for typical
+   * commit/format/codegen workflows, low enough that even a mass
+   * checkout doesn't stall the next tool call.
+   */
+  bashFileTrackingMaxFiles?: number
+  /**
+   * Auto-detect git ref movement (HEAD changing as a side effect of a
+   * bash command like `git pull`, `git merge`, `git rebase`,
+   * `git checkout`, or `git reset`) and re-run the git-history ingester
+   * in the background when it happens. Re-ingestion is idempotent —
+   * already-known commits are skipped via `insertIfMissing` — so the
+   * cost is roughly linear in the number of NEW commits.
+   *
+   * Without this, new commits arriving mid-session are invisible to
+   * `memory_recall` until the next session start. With it on, a HEAD
+   * change is detected after every `bash` call and a re-ingest is
+   * queued (de-duplicated: only one re-ingest runs at a time; further
+   * detections coalesce into the next pass). Default TRUE.
+   *
+   * The `memory_ingest_git` tool exposes the same behaviour as an
+   * explicit, on-demand call for cases where HEAD doesn't move
+   * (e.g. fetch without merge, or running outside a bash tool).
+   */
+  autoReingestGitOnHeadChange?: boolean
 }
 
 export interface ResolvedConfig {
@@ -329,6 +373,9 @@ export interface ResolvedConfig {
   enableSemanticSearch: boolean
   embeddingModel: string
   personalizedPageRank: boolean
+  recordSessionActivity: boolean
+  bashFileTrackingMaxFiles: number
+  autoReingestGitOnHeadChange: boolean
   /**
    * Names of the keys the user set explicitly in opencode.json.
    * Adaptive tuning consults this so it never overrides a value the

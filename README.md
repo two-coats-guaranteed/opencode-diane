@@ -19,7 +19,7 @@ record of what your coding agent learns about a codebase.
   repository. It pre-fills itself from git history, project files,
   docs, agent-instruction files (AGENTS.md, CLAUDE.md, .cursorrules),
   table column headers, and grammar-agnostic cross-file edges; the
-  agent reaches it through nine `memory_*` tools.
+  agent reaches it through ten `memory_*` tools.
 - **The problem it solves.** An agent re-greps and re-reads the same
   files every session. One bounded `memory_recall` replaces many raw
   discovery calls.
@@ -50,7 +50,7 @@ record of what your coding agent learns about a codebase.
   AGENTS.md and index its contents). Not a vector store by default —
   lexical BM25 — though cross-lingual semantic search is available as
   an explicit opt-in.
-- **Maturity.** 641 assertions across 23 test suites, ~93 % line
+- **Maturity.** 674 assertions across 24 test suites, ~90 % line
   coverage; verified against the documented plugin contract in 30+
   languages and against live builds with oh-my-opencode and caveman
   as coexisting plugins. Not yet run end-to-end inside a live OpenCode
@@ -73,6 +73,7 @@ decision-maker*.
 | `memory_outline` | Counts per category — token-cheap orientation. |
 | `memory_status` | Size, byte usage vs budget, last-ingest timestamps. |
 | `memory_ingest_sessions` | Pull task + tool-trace summaries from past OpenCode sessions. |
+| `memory_ingest_git` | Re-scan git history for new commits after a pull / merge / rebase. Idempotent — already-known commits are skipped. The plugin also auto-runs this in the background when it detects HEAD moved as a side effect of a `bash` call. |
 | `memory_mine_skills` | Cluster memories by subject into `SKILL.md` files. Runs in the background. |
 | `memory_skill` | List the mined skill files, or load one into the conversation — so a skill mined this session is usable now, no restart. |
 
@@ -92,7 +93,7 @@ Then in `opencode.json`:
 ```
 
 Open OpenCode in any git repository, in any language. The plugin
-loads, runs prefill in the background, registers all nine tools, and
+loads, runs prefill in the background, registers all ten tools, and
 the agent can use them immediately. If the directory is neither a git
 repo nor has a recognised manifest, the plugin logs one idle line and
 does nothing.
@@ -156,6 +157,9 @@ interface UserConfig {
   enableSemanticSearch?: boolean // default false (see WIKI: Semantic search)
   embeddingModel?: string        // default "Xenova/multilingual-e5-small"
   personalizedPageRank?: boolean // default false (co-change ranking; see WIKI)
+  recordSessionActivity?: boolean      // default true  — record this session's edits + bash as a rolling memory
+  bashFileTrackingMaxFiles?: number    // default 20    — refresh code-map for files a bash call touched (0 = off)
+  autoReingestGitOnHeadChange?: boolean // default true — re-ingest git when bash moves HEAD (pull/merge/rebase)
 }
 ```
 

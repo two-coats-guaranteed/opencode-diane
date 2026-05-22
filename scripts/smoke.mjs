@@ -91,7 +91,7 @@ ok(hooks !== null && typeof hooks === "object", "plugin(ctx) returns a hooks obj
 ok(hooks.tool !== undefined, "hooks include a tool map")
 
 const toolNames = Object.keys(hooks.tool ?? {})
-ok(toolNames.length === 9, `registers all nine tools (got ${toolNames.length})`)
+ok(toolNames.length === 10, `registers all ten tools (got ${toolNames.length})`)
 for (const expected of ["memory_recall", "memory_remember", "memory_snapshot", "memory_outline", "memory_skill"]) {
   ok(toolNames.includes(expected), `registers ${expected}`)
 }

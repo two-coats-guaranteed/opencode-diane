@@ -119,12 +119,14 @@ vendored grammar files. No GPU, no API key, no network. See
 [Performance](#performance) and [Code map](#code-map).
 
 **Is it production-ready?**
-641 assertions across 23 test suites, ~93 % line coverage, verified
+674 assertions across 24 test suites, ~90 % line coverage, verified
 against the documented plugin contract and dry-run against real repos
 in 30+ languages (code map covers 13 tree-sitter grammars; cross-refs
 adds Pascal, Ruby, Perl, Elixir, Lua, Haskell, Scala, Kotlin, Swift,
 Verilog, VHDL, COBOL, Fortran, Solidity, Smalltalk, Vim, Racket, Lisp,
-and more).
+and more). The one honest gap: it has not yet been run end-to-end inside
+a live OpenCode *server* — see [Verifying it inside
+a live OpenCode session](#verifying-it-inside-a-live-opencode-session).
 
 ## How the memory is structured
 
@@ -266,7 +268,7 @@ per-file token cost.
 run a graph algorithm. Every file gets one flat signature digest; BM25
 recall selects the most query-relevant digests at call time. The map
 is available immediately (persisted from prefill) and the token cost
-is predictable at every call. It is also only one of nine memory
+is predictable at every call. It is also only one of ten memory
 categories — git history, past sessions, mined skills and snapshots
 sit alongside it. The benchmark repo (`opencode-diane-benchmarks`)
 compares the two maps directly on real repositories.
@@ -393,7 +395,7 @@ in the background; the tool returns immediately. The mined skills are
 usable in the same session through the `memory_skill` tool — no
 restart — and OpenCode also loads them as native skills next start.
 
-## The nine tools
+## The ten tools
 
 | Tool | Purpose |
 |---|---|
@@ -404,6 +406,7 @@ restart — and OpenCode also loads them as native skills next start.
 | `memory_outline()` | Counts per category — cheap orientation. |
 | `memory_status()` | Size, byte usage vs budget, last-ingest timestamps. |
 | `memory_ingest_sessions()` | Pull task + tool-trace summaries from past OpenCode sessions. |
+| `memory_ingest_git()` | Re-scan git history for new commits arrived since startup. Idempotent — `insertIfMissing` skips already-known commits. The plugin also auto-triggers this when a `bash` call moves HEAD; this tool is the explicit version. |
 | `memory_mine_skills(reason?)` | Cluster memories into SKILL.md files. Background. |
 | `memory_skill(name?)` | List the mined skill files, or load one into the conversation — so a skill mined this session is usable now, no restart. |
 
@@ -490,8 +493,36 @@ interface UserConfig {
   enableSemanticSearch?: boolean // default false — see Semantic search
   embeddingModel?: string        // default "Xenova/multilingual-e5-small"
   personalizedPageRank?: boolean // default false — see "How it compares"
+  recordSessionActivity?: boolean      // default true  — record this session's edits + bash as a rolling memory
+  bashFileTrackingMaxFiles?: number    // default 20    — refresh code-map for files a bash call touched (0 = off)
+  autoReingestGitOnHeadChange?: boolean // default true — re-ingest git when bash moves HEAD
 }
 ```
+
+### Fine-grained tuning
+
+Most users never set these — the defaults cover typical repos. They
+exist for monorepos, documentation-heavy projects, and locked-down
+environments where every walk needs an explicit ceiling.
+
+| Option | Default | What it does |
+|---|---|---|
+| `docsMaxFiles` | `200` | Cap on `.md` / `.markdown` files walked under `docs/` plus conventional root docs (CHANGELOG, CONTRIBUTING, ARCHITECTURE, ROADMAP, …). Raise for documentation-heavy repos. |
+| `docsBodyChars` | `240` | Characters of body text captured after each heading as the recall snippet. Longer values → richer context, larger memory entries. |
+| `docsMaxHeadingLevel` | `3` | Deepest heading level indexed (`3` = H1–H3). Set `2` for only H1–H2, or `4`/`5` for deeper structure. Clamped to `[1, 6]`. |
+| `notesMaxBytes` | `6144` | Maximum bytes read from each agent-instruction file (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`, etc.). Raise for teams with detailed instructions. |
+| `tablesMaxFiles` | `200` | Cap on table files (CSV / TSV / XLSX / XLS) walked per prefill pass. |
+| `tablesMaxXlsxMB` | `50` | Skip XLSX/XLS files larger than this (in MB). Set `0` to skip all spreadsheets. |
+| `tablesMaxColumns` | `40` | Maximum column headers listed per table/sheet. Wider tables get a `(N more)` note. |
+| `crossRefsMaxFiles` | `2000` | Cap on files the cross-reference ingester walks per prefill. Raise for monorepos. |
+| `crossRefsMaxEdges` | `10000` | Hard cap on cross-reference edges emitted per pass. Controls the coverage/noise trade-off on dense codebases. |
+| `coChangeMinOccurrences` | `3` | Minimum commits in which two files must co-change before a co-change edge is recorded. Lower → denser graph on small/young repos; raise → tighter graph on busy repos. |
+| `codeMapMaxFiles` | adaptive (`1500`/`4000`/`10000`) | Cap on source files the code-map ingester parses per pass. By default sized by adaptive tuning at startup (small / medium / large tier). Setting it explicitly *overrides the adaptive choice* — useful when you want deterministic behaviour. |
+| `coChangeMaxCommits` | `5000` | Cap on git commits the co-change graph builder scans. Lower for faster startup; raise for deeper history. Adaptive sizing keeps this uniform across tiers in the current implementation; only `codeMapMaxFiles` varies by repo size. |
+
+All numeric limits are clamped to a safe minimum (typically `1`,
+sometimes `0` where "off" is meaningful) and rounded — garbage input
+in `opencode.json` never breaks the plugin.
 
 ## Coexisting plugins
 
@@ -893,7 +924,7 @@ after a few days of inactivity. For a manual sweep:
 
 ## Tests & CI
 
-641 assertions across 23 test suites (covering storage, search, ingest,
+674 assertions across 24 test suites (covering storage, search, ingest,
 cross-references, code-health, code-map, mining, sessions, adaptive tuning,
 peer compatibility, configurable limits, and more). The ingest suite exercises real git fixtures
 and a Rust project fixture; code-map parses a multi-language fixture
@@ -941,7 +972,7 @@ like everything else.
 bun install
 bun run build          # tsc -p tsconfig.json — emits dist/ + .d.ts
 bun run lint           # eslint src tests (type-aware; floating promises = error)
-bun run test           # 641 assertions across 23 test suites
+bun run test           # 674 assertions across 24 test suites
 bun run smoke          # exercises the compiled dist/ as OpenCode would
 bun run check:size     # fails if the package exceeds its size ceiling
 bun run typecheck      # no emit
@@ -1305,10 +1336,10 @@ running it. A quick manual check, in a real repo under OpenCode:
 ## Live code-map refresh
 
 When `enableCodeMap` is on and the agent modifies a source file using
-OpenCode's `write` or `edit` tool, the plugin **re-indexes that file's
-code-map memory immediately** — before the agent's next tool call —
-so `memory_code_map` never serves stale signatures within the same
-session.
+OpenCode's `write`, `edit`, or `patch` tool, the plugin **re-indexes
+that file's code-map memory immediately** — before the agent's next
+tool call — so `memory_code_map` never serves stale signatures within
+the same session.
 
 How it works: the `tool.execute.before` hook records which file a
 `write`/`edit` is about to change; the `tool.execute.after` hook
@@ -1319,24 +1350,57 @@ loads only happen once per session, at prefill), so a single-file
 re-parse costs ~milliseconds. `upsertBySubject` replaces the old
 code-map memory in place — no duplicates, no accumulation.
 
-**Honest coverage.** Only structured file-writing tools (`write`,
-`edit`, and `patch` if present) are intercepted; their args carry a
-`filePath` field the hook reads. `bash` is excluded by design: an
-arbitrary shell command's file effects can't be reliably detected.
-Deletions (`rm`, `unlink`) are not tracked. So:
+**Bash-driven changes are also tracked (since v0.0.5).** After every
+`bash` tool call the plugin runs `git status --porcelain` to find
+files the shell command modified or created, then refreshes the
+code-map for each — up to `bashFileTrackingMaxFiles` (default 20).
+This closes the long-standing gap where `git checkout other-branch`,
+`npm run format`, `cargo fmt --all`, or `sed -i …` would leave stale
+signatures in the index. Deletions are skipped (there's no file on
+disk to re-index); renames track the destination path. Set
+`bashFileTrackingMaxFiles: 0` to opt out.
 
-- Agent uses `write`/`edit` on `src/handler.go` → code map refreshed.
-- Agent runs `bash` to `sed -i …` a file → NOT refreshed (stale until next
-  explicit recall or prefill). Work around: after a bash edit, have the
-  agent call `memory_code_map` — the refresh will run at the next session's
-  prefill automatically, and the current memory still covers the
-  pre-edit signatures.
-- Agent deletes a file → its code-map memory remains until the next
-  prefill.
+The cap matters: a `git checkout` between branches can touch thousands
+of files, and re-indexing each synchronously would stall the next tool
+call. The default 20 covers typical commit/format/codegen workflows
+without that risk. The plugin logs a `debug` line when files are
+skipped over the cap so it's visible in the JSONL log without flooding
+the agent.
 
-These limits are knowable and bounded. Prefill runs fresh on every new
-session, so stale memories are always one session-close away from
-correct.
+## Live session reflection
+
+Three behaviours, added in v0.0.5, keep what's happening *right now*
+visible to the memory store:
+
+**1. Live-session activity recording** (`recordSessionActivity`,
+default on). The current session's file edits and bash commands roll
+up into ONE memory under `session-trace` → `live:${sessionId}`,
+upserted in place after each event. Lets the current session recall
+"what have I touched so far" without scanning the OpenCode SDK, and
+pre-seeds the trace so the moment this session becomes "past", a
+successor sees it like any other. The memory is **not** pinned (it's
+transient state — eligible for eviction). Content is bounded
+(~4 KB) with a rolling list of recent bash commands; total counts
+stay accurate even after detail truncation.
+
+**2. Post-bash code-map freshness** — covered above.
+
+**3. Auto git re-ingest on HEAD movement** (`autoReingestGitOnHeadChange`,
+default on). After every `bash` call the plugin polls
+`git rev-parse HEAD`; if HEAD moved (pull / merge / rebase / checkout
+/ reset), it queues a background re-ingest of git history.
+Idempotent — already-known commits are skipped via `insertIfMissing`,
+so the cost is roughly linear in the number of *new* commits.
+Concurrent triggers coalesce: only one re-ingest runs at a time, and
+further detections re-arm the flag for the next poll. The
+`memory_ingest_git` tool exposes the same logic as an explicit,
+on-demand call for cases the auto-detect can't cover (a fetch-only
+operation that brings new commits via another mechanism).
+
+Together these three close the gaps surfaced by the v0.0.4 reflection
+verdict: the current session's work, bash-driven file changes, and
+post-merge commits are all visible to recall mid-session, not only
+after a restart.
 
 ## Compatibility
 
