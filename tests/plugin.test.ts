@@ -97,7 +97,7 @@ async function main(): Promise<void> {
   git(root, ["commit", "-q", "-m", "."])
 
   const logs: LogEntry[] = []
-  const hooks = await OpencodeDiane(mockCtx(root, logs))
+  const hooks = await OpencodeDiane(mockCtx(root, logs), { exposeOpsTools: true })
   // prefill is fire-and-forget; give it a moment
   await new Promise((r) => setTimeout(r, 800))
 

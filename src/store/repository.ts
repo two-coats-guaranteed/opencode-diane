@@ -385,6 +385,15 @@ export class MemoryRepository {
     return this.meta.ingestedAt[category]
   }
 
+  /**
+   * Pass per-file commit counts from the git ingester to the index,
+   * where the co-change boost reads them to weight rare-changers more
+   * than churn-heavy files. Bulk replace; called once per git scan.
+   */
+  setFileChurn(churn: ReadonlyMap<string, number>): void {
+    this.index.setFileChurn(churn)
+  }
+
   applyEviction(config: ResolvedConfig): { removed: number } {
     const removed = evictIfOverBudget(
       [...this.byId.values()],

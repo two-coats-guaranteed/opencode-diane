@@ -256,7 +256,7 @@ async function main(): Promise<void> {
     const root = await mkdtemp(join(tmpdir(), "diane-plug-tool-"))
     await initRepo(root)
     const logs: LogEntry[] = []
-    const hooks = await OpencodeDiane(mockCtx(root, logs))
+    const hooks = await OpencodeDiane(mockCtx(root, logs), { exposeOpsTools: true })
     await new Promise((r) => setTimeout(r, 400))
     assert(
       hooks.tool !== undefined,
@@ -279,7 +279,7 @@ async function main(): Promise<void> {
     const root = await mkdtemp(join(tmpdir(), "diane-reingest-"))
     await initRepo(root)
     const logs: LogEntry[] = []
-    const hooks = await OpencodeDiane(mockCtx(root, logs))
+    const hooks = await OpencodeDiane(mockCtx(root, logs), { exposeOpsTools: true })
     await new Promise((r) => setTimeout(r, 500))
 
     // Add a new commit AFTER the plugin started.
@@ -307,7 +307,7 @@ async function main(): Promise<void> {
     const root = await mkdtemp(join(tmpdir(), "diane-reingest-nogit-"))
     await writeFile(join(root, "package.json"), '{"name":"x"}')
     const logs: LogEntry[] = []
-    const hooks = await OpencodeDiane(mockCtx(root, logs))
+    const hooks = await OpencodeDiane(mockCtx(root, logs), { exposeOpsTools: true })
     await new Promise((r) => setTimeout(r, 400))
     const t = hooks.tool as Record<string, { execute: (args: unknown, ctx: unknown) => Promise<unknown> }>
     const result = await t["memory_ingest_git"]!.execute({}, {} as never)
@@ -324,7 +324,7 @@ async function main(): Promise<void> {
     const root = await mkdtemp(join(tmpdir(), "diane-reingest-idem-"))
     await initRepo(root)
     const logs: LogEntry[] = []
-    const hooks = await OpencodeDiane(mockCtx(root, logs))
+    const hooks = await OpencodeDiane(mockCtx(root, logs), { exposeOpsTools: true })
     await new Promise((r) => setTimeout(r, 500))
     const t = hooks.tool as Record<string, { execute: (args: unknown, ctx: unknown) => Promise<unknown> }>
     // First re-ingest
@@ -345,7 +345,7 @@ async function main(): Promise<void> {
     const root = await mkdtemp(join(tmpdir(), "diane-live-hook-"))
     await initRepo(root)
     const logs: LogEntry[] = []
-    const hooks = await OpencodeDiane(mockCtx(root, logs, "sess_hook_1"))
+    const hooks = await OpencodeDiane(mockCtx(root, logs, "sess_hook_1"), { exposeOpsTools: true })
     await new Promise((r) => setTimeout(r, 500))
 
     const before = hooks["tool.execute.before"] as ((

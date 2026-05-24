@@ -6,8 +6,8 @@
 
 A memory layer for [OpenCode](https://opencode.ai). It gives the
 coding agent a persistent, searchable store of structural facts about
-a repository, so it stops re-discovering the same things — with raw
-`git log`, `grep`, and file reads — every single session.
+a repository, so it can navigate code with one bounded `memory_recall`
+call instead of many raw `git log`, `grep`, and file-read tool calls.
 
 Named for Diane in *Twin Peaks* — the recipient of Dale Cooper's
 recorded case notes. The plugin works the same way: it keeps the
@@ -23,10 +23,6 @@ record of what your coding agent learns about a codebase.
 - **The problem it solves.** An agent re-greps and re-reads the same
   files every session. One bounded `memory_recall` replaces many raw
   discovery calls.
-- **Token reduction.** 80–89 % measured *when a recall covers the
-  task* — a ceiling, not a promise; lower on terse-history, mature, or
-  tiny repos. The bundled `dry-run.mjs` gives *your* repo a GOOD /
-  MODERATE / LOW verdict before you rely on it.
 - **Deterministic.** BM25 over a hand-built index — no embeddings, no
   model, no API key, no GPU, no network. Reproducible and debuggable.
   (One opt-in exception: semantic search — off by default — adds an

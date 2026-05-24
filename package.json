@@ -1,7 +1,7 @@
 {
   "name": "opencode-diane",
-  "version": "0.0.6",
-  "description": "OpenCode plugin: hierarchical, token-efficient memory for any git repository. Convention-free — pre-fills from git diff-structure and project files, no LLM at the core, no commit-message parsing. Optional cross-lingual semantic search; skill mining.",
+  "version": "0.0.7",
+  "description": "OpenCode plugin: hierarchical, token-efficient memory for any git repository. Convention-free \u2014 pre-fills from git diff-structure and project files, no LLM at the core, no commit-message parsing. Optional cross-lingual semantic search; skill mining.",
   "keywords": [
     "opencode",
     "opencode-plugin",

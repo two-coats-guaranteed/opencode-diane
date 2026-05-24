@@ -268,6 +268,23 @@ function applyOneHopBoost(
   scoreById: Map<string, number>,
   seeds: Array<[string, number]>
 ): void {
+  // Damp the boost toward rare-changers. A file touched in many
+  // commits is "lexically promiscuous" — it co-changes with most
+  // things and is rarely the locus of a behavioural bug, even when
+  // its name matches the query (the canonical case: pylint's run.py
+  // matches CLI queries that the actual fix lives elsewhere for).
+  // Damping factor d ∈ (0, 1]:
+  //   churn ≤ 1  → 1.00   (rare-changer; full boost)
+  //   churn = 4  → 0.62
+  //   churn = 16 → 0.41
+  //   churn = 64 → 0.29
+  // Mathematically: d = 1 / (1 + log2(churn)).
+  const damping = (file: string): number => {
+    const n = index.fileChurn.get(file) ?? 0
+    if (n <= 1) return 1
+    return 1 / (1 + Math.log2(n))
+  }
+
   for (const [seedId, seedScore] of seeds) {
     const seedMem = byId.get(seedId)
     if (!seedMem) continue
@@ -284,7 +301,7 @@ function applyOneHopBoost(
         .filter((m): m is Memory => m !== undefined)
         .sort((a, b) => b.useCount - a.useCount)
         .slice(0, PROPAGATE_PER_FILE)
-      const propagated = seedScore * COCHANGE_BOOST
+      const propagated = seedScore * COCHANGE_BOOST * damping(neighborFile)
       for (const m of ranked) {
         const current = scoreById.get(m.id) ?? 0
         // Never lower an existing (textual) score; only lift.

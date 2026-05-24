@@ -538,31 +538,21 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
   }
 
   // ── 5. Tools ───────────────────────────────────────────────────────
-  return {
-    tool: {
+  // Build the full set, then expose only the three the eval showed the
+  // agent actually uses (memory_recall, memory_outline, memory_remember)
+  // unless `exposeOpsTools` is true. The seven "ops" tools went unused
+  // across all 21 diane sessions in the SWE-bench Lite eval — their
+  // descriptions only cost system-prompt tokens every turn.
+  const allTools = {
       memory_recall: tool({
         description:
-          "ALWAYS call this FIRST when a task touches existing code — before any " +
-          "read/grep/glob/bash discovery. A single recall typically replaces 3-8 " +
-          "discovery calls and costs ~10x fewer tokens: on a real repo, a recall pair " +
-          "answered a 'work on feature X' task in ~700 tokens versus ~5,400 tokens of raw " +
-          "git-log/cat/grep. Skipping it and going straight to read/grep is the slow, " +
-          "expensive path. The store holds compact facts mined from git history (commit " +
-          "diff-shapes, file co-change, churn, recency), project files (manifests/build/CI " +
-          "summarised by format), live code-health diagnostics, the code map (file " +
-          "signatures), past OpenCode sessions, and notes saved earlier. Results are " +
-          "co-change-boosted — a hit about file X also surfaces files X is historically " +
-          "modified with, so you find related context a grep would miss. Output is capped " +
-          "at `tokenBudget` (default 1200) so the cost is predictable. Workflow: recall " +
-          "first, act on what comes back, and only fall to raw discovery for the specific " +
-          "gaps recall didn't cover. Pass `category` to narrow to git-history, " +
-          "project-facts, code-health, code-map, session-trace, session-snapshot, " +
-          "agent-note, or " +
-          "skill-mined; pass `subject` to narrow to a file path or task name. " +
-          "Pass `prefer` to make ranking match intent: 'tests' when the user asks " +
-          "about tests/test coverage, 'code' when they want the implementation " +
-          "(gently down-ranks test files), 'history' for change history. Omit it for " +
-          "general queries — it is a mild lean, never a filter.",
+          "Search the repo memory store for code structure, file co-change, " +
+          "and notes relevant to a task. Returns a token-budgeted digest of " +
+          "ranked file signatures, recent commits, and saved notes. " +
+          "Cost: typically 500-3000 input tokens of context returned. " +
+          "Use when you don't know which file to start with. Skip when the " +
+          "user already named the file, or when one read/grep would obviously " +
+          "answer the question.",
         args: {
           query: tool.schema.string().describe("Free-form search query — words, file paths, identifiers."),
           category: tool.schema.string().optional().describe("Optional category filter."),
@@ -637,12 +627,58 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
             summary.hadSubject = args.subject !== undefined
             summary.tokenBudget = args.tokenBudget ?? 1200
             if (hits.length === 0) return "(no memories matched)"
-            const lines = hits.map(formatHit)
-            if (omitted > 0) {
-              lines.push(
-                `… (+${omitted} more hit${omitted === 1 ? "" : "s"} omitted to fit the ` +
-                  `~${args.tokenBudget ?? 1200}-token budget — raise tokenBudget or narrow the query)`
-              )
+
+            // Confidence-based payload sizing.
+            // The 40-session SWE-bench eval showed diane's failure mode
+            // on `pylint-6506` was confidently misrouting: a high BM25
+            // score on the wrong file. The fix is to *not* commit to a
+            // confident-looking answer unless the score distribution
+            // actually supports it.
+            //
+            //  - top-1 score dominates (ratio top-1 / top-3 > 2.0):
+            //    return up to 3 hits with full content. The store
+            //    believes it knows the answer.
+            //  - moderate spread (1.5 < ratio ≤ 2.0): default behaviour.
+            //  - flat scores (ratio ≤ 1.5): the store has no idea which
+            //    is best. Return path-only entries — let the agent
+            //    pick by name instead of getting blanketed in content
+            //    that's no more relevant than a grep.
+            const top1 = hits[0].score
+            const refScore = hits[Math.min(2, hits.length - 1)].score
+            const ratio = refScore > 0 ? top1 / refScore : Infinity
+            summary.confidence = ratio >= 2.0 ? "peaked"
+                              : ratio > 1.5  ? "moderate"
+                              : "flat"
+            summary.scoreRatio = Number.isFinite(ratio) ? Number(ratio.toFixed(2)) : null
+
+            const lines: string[] = []
+            if (ratio >= 2.0) {
+              // peaked — top hit(s) only, with full content
+              const keep = hits.slice(0, Math.min(3, hits.length))
+              for (const h of keep) lines.push(formatHit(h))
+              const more = hits.length - keep.length + omitted
+              if (more > 0) {
+                lines.push(`… (+${more} lower-scoring hits suppressed — top-1 score ${top1.toFixed(2)} dominates)`)
+              }
+            } else if (ratio <= 1.5) {
+              // flat — paths only, no content. Half-page of paths beats
+              // a third-page of half-relevant content blocks.
+              for (const h of hits) {
+                lines.push(`[${h.memory.category} | ${h.memory.subject} | score ${h.score.toFixed(2)}]`)
+              }
+              if (omitted > 0) {
+                lines.push(`… (+${omitted} more omitted to fit the ~${args.tokenBudget ?? 1200}-token budget)`)
+              }
+              lines.push(`(scores are flat — content omitted. Use memory_recall again with a more specific query, or read the file you want directly.)`)
+            } else {
+              // moderate — original token-budgeted listing
+              for (const h of hits) lines.push(formatHit(h))
+              if (omitted > 0) {
+                lines.push(
+                  `… (+${omitted} more hit${omitted === 1 ? "" : "s"} omitted to fit the ` +
+                    `~${args.tokenBudget ?? 1200}-token budget — raise tokenBudget or narrow the query)`
+                )
+              }
             }
             return lines.join("\n")
           } catch (e) {
@@ -656,13 +692,11 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
 
       memory_remember: tool({
         description:
-          "Save a note into project memory so a FUTURE turn can recall it instead of " +
-          "rediscovering it. Use this whenever you learn something non-obvious that cost " +
-          "you tool calls to find — a tricky file path, a non-obvious coupling, a decision " +
-          "the user just made, a regression to watch for. Treat it as the write-side of " +
-          "the recall-first workflow: what you remember now is what you (or the next " +
-          "session) won't have to grep for later. Use sparingly — only durable facts, " +
-          "never transient state. The note becomes searchable via memory_recall.",
+          "Save a durable note that a future session can recall instead " +
+          "of rediscovering. Use for facts that cost real tool-calls to " +
+          "find: a non-obvious file path, an unstated coupling, a " +
+          "regression to watch for, a decision the user just made. " +
+          "Don't use for transient state.",
         args: {
           subject: tool.schema.string().describe("Short slug (e.g. 'auth/login.py', 'task:add-pagination')."),
           content: tool.schema.string().describe("The note itself — one short paragraph."),
@@ -752,12 +786,11 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
 
       memory_outline: tool({
         description:
-          "Call this ONCE at the start of a session on an unfamiliar repo — it is the " +
-          "cheapest possible orientation (a few tokens) and tells you what the memory " +
-          "store already knows: how many entries per category. Use it to decide what to " +
-          "memory_recall next instead of guessing. If categories like git-history or " +
-          "code-map have entries, that knowledge is one recall away — don't rediscover it " +
-          "with raw tools.",
+          "Return a count of memories per category in the store " +
+          "(git-history, code-map, etc.). Cheap (~50 tokens out). " +
+          "Use once at session start on an unfamiliar repo to decide " +
+          "which category to memory_recall next. Skip if you already " +
+          "know what file to look at.",
         args: {},
         async execute() {
           const t0 = performance.now()
@@ -1199,7 +1232,21 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
           }
         },
       }),
-    },
+  } as const
+  type AllTools = typeof allTools
+
+  // Default registration: only the three tools the eval showed the
+  // agent calls. `exposeOpsTools: true` widens to everything above.
+  const exposedTools: Partial<AllTools> = config.exposeOpsTools
+    ? allTools
+    : {
+        memory_recall:   allTools.memory_recall,
+        memory_outline:  allTools.memory_outline,
+        memory_remember: allTools.memory_remember,
+      }
+
+  return {
+    tool: exposedTools,
 
     // ── Live signal: LSP diagnostics → code-health memories ──────────
     // Fires whenever a language server re-analyses a file. We upsert
@@ -1665,6 +1712,7 @@ function coerceUserConfig(options: unknown): UserConfig {
   num("codeMapMaxFiles")
   num("coChangeMaxCommits")
   bool("enableNudgeHook")
+  bool("exposeOpsTools")
   bool("adaptive")
   bool("enableSemanticSearch")
   str("embeddingModel")
@@ -1692,10 +1740,10 @@ function resolveConfig(user: UserConfig): ResolvedConfig {
     ingestSessions: user.ingestSessions ?? true,
     enableCodeMap: user.enableCodeMap ?? true,
     installUsageSkill: user.installUsageSkill ?? true,
-    ingestDocs: user.ingestDocs ?? true,
-    ingestProjectNotes: user.ingestProjectNotes ?? true,
-    ingestTableHeaders: user.ingestTableHeaders ?? true,
-    ingestCrossRefs: user.ingestCrossRefs ?? true,
+    ingestDocs: user.ingestDocs ?? false,
+    ingestProjectNotes: user.ingestProjectNotes ?? false,
+    ingestTableHeaders: user.ingestTableHeaders ?? false,
+    ingestCrossRefs: user.ingestCrossRefs ?? false,
     crossRefsRarityThreshold: Math.max(1, Math.round(user.crossRefsRarityThreshold ?? 3)),
     crossRefsMaxFiles:        Math.max(1, Math.round(user.crossRefsMaxFiles ?? 2000)),
     crossRefsMaxEdges:        Math.max(1, Math.round(user.crossRefsMaxEdges ?? 10_000)),
@@ -1708,6 +1756,7 @@ function resolveConfig(user: UserConfig): ResolvedConfig {
     notesMaxBytes:            Math.max(256, Math.round(user.notesMaxBytes ?? 6144)),
     coChangeMinOccurrences:   Math.max(1, Math.round(user.coChangeMinOccurrences ?? 3)),
     enableNudgeHook: user.enableNudgeHook ?? true,
+    exposeOpsTools: user.exposeOpsTools ?? false,
     adaptive: user.adaptive ?? true,
     enableSemanticSearch: user.enableSemanticSearch ?? false,
     embeddingModel: user.embeddingModel ?? DEFAULT_EMBEDDING_MODEL,

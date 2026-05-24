@@ -102,7 +102,7 @@ async function main(): Promise<void> {
 
   // ── T0: build the plugin. memory_skill is registered now. ─────────
   console.log("\n── skill activation: tool is registered ──────────────────")
-  const hooks = await OpencodeDiane(mockCtx(root, prompts), { forceActive: true, installUsageSkill: false })
+  const hooks = await OpencodeDiane(mockCtx(root, prompts), { forceActive: true, installUsageSkill: false, exposeOpsTools: true })
   const tools = hooks.tool ?? {}
   assert(typeof tools.memory_skill?.execute === "function", "memory_skill tool is registered")
   const skillTool = tools.memory_skill!

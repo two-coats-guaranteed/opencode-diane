@@ -57,7 +57,7 @@ happened or physically exists**:
 - From the language server (live): current diagnostics per file —
   the compiler's / type-checker's own output, normalised by LSP
   across 40+ languages. No heuristics.
-- From tree-sitter (on by default): per-file definition *signatures* — the
+- From tree-sitter (opt-in): per-file definition *signatures* — the
   structural shape of the code, bodies stripped.
 
 ## Straight answers for a decision-maker
@@ -104,13 +104,25 @@ inspectable. (An opt-in semantic-search mode adds an embedding model
 for cross-lingual recall — off unless you enable it.) See [How it
 compares](#how-it-compares).
 
-**What token reduction can I actually expect?**
-When a recall covers the task, 80–89 % measured on real repos with
-history. That is a *ceiling*, not a promise — it assumes the recall is
-relevant. It is lower on terse-history repos, mature/stable repos,
-dynamic-dispatch code, and tiny repos. The `dry-run.mjs` script gives
-your repo a GOOD / MODERATE / LOW verdict before you rely on it. See
-[What token reduction to expect](#what-token-reduction-to-expect).
+**What's actually measured?**
+A 40-session controlled eval (2 SWE-bench Lite instances × 5 runs × 2
+conditions × 2 models) is the only external measurement to date.
+Headline:
+- **Solve-rate (file-level overlap):** 9/10 with diane and 9/10
+  without, on Sonnet 4.6. Same on Haiku: 5/10 vs 5/9.
+- **Wall-clock:** diane is ~40 % faster on Sonnet (61 s vs 104 s
+  average).
+- **Cost:** diane is ~1.8× more expensive per session at both models.
+The trade is *tokens for latency*. See [Measured performance][evaldoc]
+for the per-session traces.
+
+[evaldoc]: ./EVAL.md
+
+**Where does the cost come from?**
+Tool descriptions in the system prompt (cached, read on every turn)
+and recall results that linger in conversation history (also cached
+and re-read). The recall payload itself is cheap; the *persistence*
+of context is what shows up on the bill.
 
 **What does it cost to run?**
 The core plugin is ~77 KB with one small dependency, and a large store
@@ -1013,51 +1025,71 @@ allowlist in `package.json` limits the tarball to `dist/`, `grammars/`,
 its ceiling or a vendored grammar goes missing — so a size regression
 cannot ship silently.
 
-## Token savings
+## Measured performance
 
-The plugin's premise is that a token-budgeted recall is cheaper than
-the raw discovery an agent would otherwise do. That claim is measured
-two ways, both with zero API spend.
+The plugin's only external measurement to date is a 40-session
+controlled eval against SWE-bench Lite. The earlier "token reduction"
+framing — measured by replaying a hypothetical discovery script vs the
+plugin output — is *not* a real-agent measurement; it estimated how
+much of the search work could in principle be replaced. The eval below
+measures the actual outcome.
 
-### What token reduction to expect
+### The eval
 
-The honest range, from measured runs:
+- **2 SWE-bench Lite instances** (`psf__requests-1963`,
+  `pylint-dev__pylint-6506`)
+- **5 runs per condition**, two conditions (diane plugin on, off)
+- **2 models** (Haiku 4.5 and Sonnet 4.6), independently
+- **Metric:** file-level overlap — does the agent's diff touch the file
+  in the gold patch? (Test-pass evaluation would need Docker.)
 
-- **When a recall covers the task: 80–89 %.** Real-repo measurements
-  (`measure-savings.mjs`): ~87 % on `zerolog`, ~89 % on `click`,
-  ~85 % on `express` — ~8–11k tokens of raw discovery collapsing to
-  ~1.1–1.2k of recall.
-- That figure is a **ceiling, not a promise.** It is "tokens saved
-  *if the recall is relevant*" — it is not a relevance score. A recall
-  can be cheap and still mediocre (see the `express` case under
-  *Real-world usefulness*).
-- **Lower** on: terse-history repos (low-signal commit text), mature/
-  stable repos (recent history is dependency bumps), dynamic-dispatch
-  codebases (the code map extracts *declared* signatures), and very
-  small repos (raw discovery was already cheap — reported as
-  "inconclusive", not a loss).
-- The gated test floor is deliberately conservative: a fixture
-  end-to-end orientation must be **> 25 %** cheaper, and recall output
-  must stay within ~2× its own token budget — so the plugin's
-  footprint can never turn a saving into a cost.
+### Headline
 
-Before trusting it on your repo, run `scripts/dry-run.mjs <repo>`: it
-prints a **GOOD / MODERATE / LOW** verdict on the git-history signal
-and shows real query results with their token cost. That verdict is
-the answer for *your* repo, which no general percentage can give.
+| Model | Condition | hit-rate | $/session | wall-clock | $/hit |
+|---|---:|---:|---:|---:|---:|
+| Sonnet 4.6 | diane    | 9/10 (90 %) | $0.182 | 61 s  | $0.203 |
+| Sonnet 4.6 | baseline | 9/10 (90 %) | $0.100 | 104 s | $0.112 |
+| Haiku 4.5  | diane    | 5/10 (50 %) | $0.156 | 80 s  | $0.313 |
+| Haiku 4.5  | baseline | 5/9  (56 %) | $0.082 | 85 s  | $0.147 |
 
-### How it is measured
+### What the data says
 
-`scripts/measure-savings.mjs <repo>` runs a realistic *without-plugin*
-discovery recipe (recent git history, a tree listing, reading the
-files whose names match the task, a grep), sums the token cost, then
-runs the *with-plugin* memory calls and sums those. Both sides print
-what they ran. It's honest about coverage: thin recall results assume
-the agent still does part of the fallback discovery rather than
-claiming an unrealistic 100 %, and a non-git repo with an empty store
-is reported "inconclusive", not a win. Sample runs land around 80 % on
-real repos with history; on a tiny repo the saving is modest, because
-the baseline was already cheap — that's correct, not a failure.
+- **No solve-rate benefit on this slice.** Tied on Sonnet. Within
+  noise on Haiku.
+- **~40 % wall-clock reduction on Sonnet.** Diane 61 s avg, baseline
+  104 s avg. On `requests-1963`: 37 s vs 110 s.
+- **~1.8× cost premium across both models** — structural, comes from
+  tool descriptions in the system prompt and recall results retained
+  in the conversation.
+- **Sonnet recovers the failure mode that wrecked Haiku.** On
+  `pylint-6506`, Haiku + diane was 0/5 — diane confidently misrouted
+  the agent. Sonnet + diane is 4/5. A strong model treats the recall
+  as a hint; a weak one treats it as the answer.
+
+### Caveats
+
+- **n = 2 instances**, both from small Python libraries.
+- **File-level overlap, not test-pass.** Touching the right file
+  doesn't mean the fix is correct.
+- **No comparison vs agentmemory or aider** on the same probe.
+
+A larger eval — 30+ instances across 4+ repos, file-level *and*
+test-pass — is the next roadmap item. Until then, treat any
+single-number performance claim about diane as a hypothesis, not a
+result.
+
+### How to reproduce
+
+```sh
+# from this repo, with the eval harness and your API key:
+./bootstrap
+echo "ANTHROPIC_API_KEY=sk-..." >> .env
+./run --instances 2 --runs 5 --conditions diane,baseline --model claude-sonnet-4-6
+```
+
+The harness reads tokens directly from OpenCode's SQLite — the same
+`input/output/cache.read/cache.write` fields the Anthropic API
+returned. No estimation.
 
 `tests/token-savings.test.ts` turns the same method into gated
 assertions on a fixture repo with real history: a single file's
@@ -1229,16 +1261,23 @@ The plugin was dry-run against real repositories — `rs/zerolog` (Go),
 `redis/redis` (C), `facebook/rocksdb` (C++) and
 `spring-projects/spring-framework` (Java, 11k files) — using
 `scripts/dry-run.mjs` (ingests a checkout and shows the actual memories
-and the results of realistic developer queries) and
-`scripts/measure-savings.mjs` (models the token cost of raw discovery
-versus a recall). The honest findings:
+and the results of realistic developer queries). The honest findings:
 
-**Measured token savings.** When recall covers a task, the saving is
-large: ~87 % on `zerolog`, ~89 % on `click`, ~85 % on `express` — raw
-discovery of ~8–11k tokens collapsing to ~1.1–1.2k. But that number is
-"tokens saved *if recall is relevant*". It is not a relevance score —
-see the express case below, where the token count looks great while the
-hits are mediocre. Treat the percentage as a ceiling, not a promise.
+**Synthetic-discovery vs real-agent.** The earlier
+`scripts/measure-savings.mjs` script compared the plugin's recall
+output against a *modelled* discovery recipe (recent git log, tree
+listing, a few greps, file reads) and reported 80–90 % "token
+reduction" on `zerolog`, `click`, `express`. That was an upper-bound
+estimate of how much of the search work *could in principle be
+replaced*. The 40-session controlled eval against SWE-bench Lite (see
+[Measured performance][evaldoc]) does not corroborate that as an
+end-to-end agent saving: at session level, diane spends ~1.8× as
+many tokens as the no-memory baseline because the recall results
+persist in conversation history and the tool descriptions live in the
+system prompt every turn. The synthetic measurement is *not wrong*;
+it answers a different question than "what does an agent pay."
+
+[evaldoc]: #measured-performance
 
 **It helps most on** repos with descriptive commit messages and
 *statically-declared* code structure (Go, Rust, typed Java/Python),

@@ -7,6 +7,71 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 on the understanding that the public surface for SemVer purposes is the
 tool list (`memory_*`) and the documented `UserConfig` options.
 
+## [0.0.7] — 2026-05-23
+
+This release is the response to the project's first external evaluation:
+a 40-session controlled run against SWE-bench Lite (2 instances × 5
+runs × 2 conditions × 2 models). The eval contradicted the README's
+prior "80–89 % token reduction" claim — diane used ~1.8× as many
+tokens as the no-memory baseline at both Haiku 4.5 and Sonnet 4.6,
+with no solve-rate benefit. Its one measurable upside was a ~40 %
+wall-clock reduction on Sonnet. Tool-call traces also showed that of
+the ten `memory_*` tools, the agent only ever called three across
+all 21 diane sessions.
+
+### Changed — defaults
+
+- **`exposeOpsTools` (new, default `false`)** hides the seven
+  `memory_*` tools the eval showed the agent never calls
+  (`memory_snapshot`, `memory_status`, `memory_code_map`,
+  `memory_skill`, `memory_ingest_sessions`, `memory_ingest_git`,
+  `memory_mine_skills`). The default registration is now three:
+  `memory_recall`, `memory_outline`, `memory_remember`. Set to
+  `true` to restore the full ten-tool surface for explicit ops
+  workflows.
+- **Opportunistic ingesters now opt-in.** Defaults for `ingestDocs`,
+  `ingestProjectNotes`, `ingestTableHeaders`, `ingestCrossRefs` are
+  now `false`. They added startup latency without a measurable
+  retrieval-quality benefit in the eval. Code-map and git-history
+  remain on by default — those are the two that actually drive
+  recall.
+
+### Changed — retrieval
+
+- **Confidence-based payload sizing in `memory_recall`.** The recall
+  now inspects the BM25 score distribution and shapes its return:
+  - **Peaked** (top-1 / top-3 ≥ 2.0): top 1–3 hits with full content,
+    rest suppressed. The store believes it knows the answer.
+  - **Flat** (ratio ≤ 1.5): paths only, no content. The store has no
+    confident answer — half a page of paths beats third-of-a-page
+    blocks of half-relevant content. Includes an explicit "scores are
+    flat — read the file directly or refine the query" line.
+  - **Moderate** in between: the previous token-budgeted behaviour.
+  The `pylint-6506` failure in the eval was diane confidently
+  misrouting on a high-but-wrong BM25 score; this is the targeted
+  response.
+- **Directional co-change boost.** The one-hop co-change boost now
+  scales by `1 / (1 + log2(churn))` of the neighbor file: a
+  rare-changer (e.g. `config_initialization.py`) gets full boost, a
+  churn-heavy file (`run.py`, `conftest.py`) gets meaningfully less.
+  Behavioural bugs land more often in rare-changers, while
+  churn-heavy files are usually generic touchpoints — the damping
+  pushes the recall toward the locus of the bug instead of the most
+  active file in the repo. Falls back to flat (un-damped) behaviour
+  when no churn data is available, matching pre-v0.0.7.
+- **Tool descriptions trimmed.** `memory_recall`, `memory_outline`,
+  and `memory_remember` descriptions cut by ~60 % each; the
+  "ALWAYS call this FIRST" steering removed. Each description now
+  states the typical token cost and an explicit "skip when" clause.
+  Less system-prompt overhead per turn; less reflexive use.
+
+### Verification
+
+- 691 test assertions still pass (`bun test`); typecheck and build
+  clean.
+- Pending: re-run the 40-session SWE-bench harness against this
+  release to measure whether the cost premium drops toward 1.0×.
+
 ## [0.0.6] — 2026-05-22
 
 ### Added

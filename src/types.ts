@@ -231,6 +231,23 @@ export interface UserConfig {
    */
   enableNudgeHook?: boolean
   /**
+   * Expose the full memory_* tool surface to the agent. Default FALSE.
+   *
+   * The 40-session SWE-bench Lite eval (2 instances × 5 runs × 2
+   * conditions × 2 models) showed the agent only ever called three of
+   * the ten memory_* tools: memory_recall, memory_outline, and
+   * memory_remember. The other seven (memory_snapshot, memory_status,
+   * memory_code_map, memory_skill, memory_ingest_*, memory_mine_skills)
+   * were never invoked in any of the 21 diane sessions traced. Their
+   * descriptions still occupied the system prompt every turn, cached
+   * and re-read at the cache-read rate.
+   *
+   * Default FALSE registers only the three tools the eval showed the
+   * agent actually uses. Set TRUE to expose all ten — for explicit
+   * operator workflows that depend on the others.
+   */
+  exposeOpsTools?: boolean
+  /**
    * Adapt size-derived settings to the repository. Default TRUE.
    *
    * When on, prefill measures one cheap signal — commit count (or
@@ -369,6 +386,7 @@ export interface ResolvedConfig {
   notesMaxBytes: number
   coChangeMinOccurrences: number
   enableNudgeHook: boolean
+  exposeOpsTools: boolean
   adaptive: boolean
   enableSemanticSearch: boolean
   embeddingModel: string

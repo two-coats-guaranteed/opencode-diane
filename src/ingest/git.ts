@@ -242,6 +242,12 @@ export async function ingestGitHistory(
     result.churnMemories += 1
   }
 
+  // Hand the per-file churn map to the index. The co-change boost
+  // reads it to damp neighbours that change too often to be useful —
+  // a churn-heavy file caught a query keyword by coincidence more
+  // often than because of any genuine structural relationship.
+  repo.setFileChurn(churn)
+
   // ── Recency — what was touched most recently ──────────────────────
   const recentNonMerge = commits.filter((c) => !c.isMerge).slice(0, RECENCY_WINDOW)
   if (recentNonMerge.length > 0) {

@@ -35,6 +35,27 @@ export class InvertedIndex {
    */
   readonly coChange = new Map<string, Set<string>>()
 
+  /**
+   * Per-file commit count from git history, populated by the git
+   * ingester. Used to damp the co-change boost toward rare-changers:
+   * a file that changes in every other commit (run.py, conftest.py)
+   * is usually a generic touchpoint, while a file that changes only
+   * a few times often hosts the actual behaviour being asked about.
+   * Empty before the first git scan — the boost falls back to flat
+   * (un-damped) behaviour, matching pre-v0.0.7.
+   */
+  readonly fileChurn = new Map<string, number>()
+
+  /**
+   * Bulk replace the per-file churn counts. Called once per git scan.
+   * Keyed by relative file path; values are commit counts in the
+   * scanned window (non-merge commits only).
+   */
+  setFileChurn(churn: ReadonlyMap<string, number>): void {
+    this.fileChurn.clear()
+    for (const [path, n] of churn) this.fileChurn.set(path, n)
+  }
+
   /** Running sum of doc lengths — for avgdl. */
   totalLength = 0
   /** Number of indexed docs. */
