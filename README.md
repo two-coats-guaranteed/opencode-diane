@@ -13,24 +13,26 @@ Named for Diane in *Twin Peaks* — the recipient of Dale Cooper's
 recorded case notes. The plugin works the same way: it keeps the
 record of what your coding agent learns about a codebase.
 
-## TL;DR for a decision-maker
 
-- **What it is.** A hierarchical, BM25-ranked memory layer for any git
-  repository. It pre-fills itself from git history, project files,
-  docs, agent-instruction files (AGENTS.md, CLAUDE.md, .cursorrules),
-  table column headers, and grammar-agnostic cross-file edges; the
-  agent reaches it through ten `memory_*` tools.
-- **The problem it solves.** An agent re-greps and re-reads the same
-  files every session. One bounded `memory_recall` replaces many raw
-  discovery calls.
-- **Deterministic.** BM25 over a hand-built index — no embeddings, no
-  model, no API key, no GPU, no network. Reproducible and debuggable.
-  (One opt-in exception: semantic search — off by default — adds an
-  embedding model for cross-lingual recall. See below.)
-- **Convention-free.** It never parses commit messages for meaning;
-  every signal is a physical fact (files touched, lines ±, co-change).
-  It behaves identically on a `wip` / `.` / `更新` history and a
-  pristine one.
+## What it is, mechanically
+
+- A hierarchical, BM25-ranked store of facts about a repository.
+- Three tools the agent reaches for in practice: `memory_recall`,
+  `memory_outline`, `memory_remember`. (Earlier versions exposed ten;
+  the eval showed seven were never called.)
+- Ingestion runs **once on plugin load**: code-map (tree-sitter
+  signatures) and git history (co-change, churn). Other ingesters
+  (docs, project notes, table headers, cross-refs, sessions) are
+  opt-in via config — they were on by default in earlier versions but
+  added startup time without measurable benefit.
+- **Deterministic.** BM25 over a hand-built inverted index — no
+  embeddings, no model, no API key, no GPU, no network. Reproducible
+  and debuggable. An opt-in semantic add-on exists for cross-lingual
+  recall.
+- **Convention-free.** Never parses commit messages or natural
+  language for meaning. Every signal is a physical fact (files
+  touched, lines ±, co-change frequency). It behaves identically on a
+  `wip` / `.` / non-English history and a pristine one.
 - **Languages.** Code map covers 13 tree-sitter grammars. The
   grammar-agnostic cross-reference ingester extends this to 30+
   languages (Pascal, Ruby, Perl, Elixir, Verilog, VHDL, COBOL,

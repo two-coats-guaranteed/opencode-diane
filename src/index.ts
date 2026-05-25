@@ -546,13 +546,11 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
   const allTools = {
       memory_recall: tool({
         description:
-          "Search the repo memory store for code structure, file co-change, " +
-          "and notes relevant to a task. Returns a token-budgeted digest of " +
-          "ranked file signatures, recent commits, and saved notes. " +
-          "Cost: typically 500-3000 input tokens of context returned. " +
-          "Use when you don't know which file to start with. Skip when the " +
-          "user already named the file, or when one read/grep would obviously " +
-          "answer the question.",
+          "Call this as your FIRST action on any task that involves " +
+          "modifying or understanding existing code — before grep, " +
+          "before read, before bash. It returns the top 1-3 file paths " +
+          "to start from. Faster than grepping blindly. " +
+          "Skip only when the user has already named a specific file path.",
         args: {
           query: tool.schema.string().describe("Free-form search query — words, file paths, identifiers."),
           category: tool.schema.string().optional().describe("Optional category filter."),
@@ -628,59 +626,61 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
             summary.tokenBudget = args.tokenBudget ?? 1200
             if (hits.length === 0) return "(no memories matched)"
 
-            // Confidence-based payload sizing.
-            // The 40-session SWE-bench eval showed diane's failure mode
-            // on `pylint-6506` was confidently misrouting: a high BM25
-            // score on the wrong file. The fix is to *not* commit to a
-            // confident-looking answer unless the score distribution
-            // actually supports it.
+            // Routing-hint format: always brief, always actionable.
             //
-            //  - top-1 score dominates (ratio top-1 / top-3 > 2.0):
-            //    return up to 3 hits with full content. The store
-            //    believes it knows the answer.
-            //  - moderate spread (1.5 < ratio ≤ 2.0): default behaviour.
-            //  - flat scores (ratio ≤ 1.5): the store has no idea which
-            //    is best. Return path-only entries — let the agent
-            //    pick by name instead of getting blanketed in content
-            //    that's no more relevant than a grep.
-            const top1 = hits[0].score
-            const refScore = hits[Math.min(2, hits.length - 1)].score
-            const ratio = refScore > 0 ? top1 / refScore : Infinity
-            summary.confidence = ratio >= 2.0 ? "peaked"
-                              : ratio > 1.5  ? "moderate"
-                              : "flat"
-            summary.scoreRatio = Number.isFinite(ratio) ? Number(ratio.toFixed(2)) : null
-
+            // The 60-session eval showed that a long content digest causes
+            // agents to spend many turns "processing" the recall before
+            // acting — driving up output tokens without improving solve rate.
+            // The opposite failure (paths-only) causes agents to skip the
+            // recall entirely when scores are flat.
+            //
+            // Solution: always return a compact routing hint — top 1-3
+            // file paths with the single most relevant signature each.
+            // ~80-150 tokens total. The agent goes directly to the file
+            // with `read` and starts working. No detour, no large blob
+            // to respond to.
+            //
+            // Co-change partners are listed so the agent knows related
+            // files to check if the top file isn't the right one.
+            const topHits = hits.slice(0, Math.min(3, hits.length))
             const lines: string[] = []
-            if (ratio >= 2.0) {
-              // peaked — top hit(s) only, with full content
-              const keep = hits.slice(0, Math.min(3, hits.length))
-              for (const h of keep) lines.push(formatHit(h))
-              const more = hits.length - keep.length + omitted
-              if (more > 0) {
-                lines.push(`… (+${more} lower-scoring hits suppressed — top-1 score ${top1.toFixed(2)} dominates)`)
-              }
-            } else if (ratio <= 1.5) {
-              // flat — paths only, no content. Half-page of paths beats
-              // a third-page of half-relevant content blocks.
-              for (const h of hits) {
-                lines.push(`[${h.memory.category} | ${h.memory.subject} | score ${h.score.toFixed(2)}]`)
-              }
-              if (omitted > 0) {
-                lines.push(`… (+${omitted} more omitted to fit the ~${args.tokenBudget ?? 1200}-token budget)`)
-              }
-              lines.push(`(scores are flat — content omitted. Use memory_recall again with a more specific query, or read the file you want directly.)`)
-            } else {
-              // moderate — original token-budgeted listing
-              for (const h of hits) lines.push(formatHit(h))
-              if (omitted > 0) {
-                lines.push(
-                  `… (+${omitted} more hit${omitted === 1 ? "" : "s"} omitted to fit the ` +
-                    `~${args.tokenBudget ?? 1200}-token budget — raise tokenBudget or narrow the query)`
-                )
-              }
+            for (let i = 0; i < topHits.length; i++) {
+              const h = topHits[i]
+              // Extract the single most relevant line from content.
+              // Content is typically a multi-line signature block; take
+              // the first non-empty line (the most structural one).
+              const firstLine = h.memory.content
+                .split("\n")
+                .map((l) => l.trim())
+                .find((l) => l.length > 0) ?? ""
+              const truncated = firstLine.length > 120 ? firstLine.slice(0, 117) + "…" : firstLine
+              lines.push(
+                `${i + 1}. ${h.memory.subject}` +
+                  (truncated ? `  — ${truncated}` : "")
+              )
             }
-            return lines.join("\n")
+
+            // Co-change partners from the top hit (routing context).
+            const topFile = topHits[0]?.memory.subject ?? ""
+            const topFileBase = topFile.split("/").pop() ?? topFile
+            const neighbors = repo["index"]?.coChangeNeighbors?.(topFile)
+            if (neighbors && neighbors.size > 0) {
+              const sorted = Array.from(neighbors)
+                .sort()
+                .slice(0, 3)
+                .map((f) => f.split("/").pop() ?? f)
+              lines.push(`   ↳ often changes with: ${sorted.join(", ")}`)
+            }
+
+            const extra = hits.length - topHits.length + omitted
+            if (extra > 0) lines.push(`   (+${extra} more — narrow query or raise limit)`)
+
+            summary.confidence = "routing-hint"
+            summary.scoreRatio = hits.length > 1 && hits[1].score > 0
+              ? Number((hits[0].score / hits[1].score).toFixed(2))
+              : null
+
+            return `Start here:\n${lines.join("\n")}`
           } catch (e) {
             error = e instanceof Error ? e.message : String(e)
             throw e
