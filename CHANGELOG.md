@@ -7,6 +7,113 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 on the understanding that the public surface for SemVer purposes is the
 tool list (`memory_*`) and the documented `UserConfig` options.
 
+## [0.0.9] — 2026-05-28
+
+Two additions on top of 0.0.8: **fused recall** (default ON — a measured
+win) and **goal-shift context compaction** (default OFF — experimental).
+
+### Fused recall (default ON)
+
+`memory_recall` now returns its routing hint *plus the body of the single
+most query-relevant function* from the top-ranked file, in one response —
+capped at `fuseRecallMaxLines` (150), falling back to pointer-only for
+larger functions. Token-overlap scoring (snake_case / camelCase aware)
+picks the function.
+
+Rationale and result: session cost is dominated by turn count (each turn
+re-bills the cached conversation). Fusing the relevant code into the
+recall response collapses the locate→understand phase from several turns
+to one. Measured on a 30-session, 3-way SWE-bench Lite run (Sonnet, fused
+vs pointer-only vs baseline):
+
+| metric (median) | fused | pointer-only | baseline |
+|---|---:|---:|---:|
+| solve rate | 10/10 | 9/10 | 7/10 |
+| tool calls / session | 10.5 | 13.0 | 3.0 |
+| $/session | $0.133 | $0.164 | $0.069 |
+| cache_read | 127k | 178k | 10k |
+
+Fused beats pointer-only on every axis (−19% cost, −28% cache_read, −2.5
+tool calls, +1 solve) and — importantly — *stabilizes* behaviour: the
+pointer-only worst case ran to 57 tool calls / 1.6M cache_read; fused
+capped at 17. Config: `fuseRecallBody` (default true), `fuseRecallMaxLines`
+(default 150).
+
+### Goal-shift context compaction (default OFF, experimental)
+
+When the conversation's goal shifts, mask the stale span's tool
+observations (file reads, command output) — keeping reasoning intact —
+and re-insert an archived segment's observations if the goal later drifts
+back. Implements the "trigger + indexed re-insertion" loop described in
+the recent agent-memory literature (Memex-style indexed experience;
+observation-masking per Lindenbauer et al. 2025), with the explicit goal
+of being non-lossy: originals are stashed (and independently re-fetchable
+via the session API), so a premature compaction is recoverable — the
+defence against "summarization drift".
+
+- **Detection** is online and cheap. Default backend is lexical-cohesion
+  (TextTiling-style cosine over a running term centroid, snake/camel
+  aware), which is strong in the coding domain where a goal change drags a
+  large vocabulary change with it. An embedding backend (reusing the e5
+  model) is implemented and unit-tested but not wired into the live hot
+  path, because the model loads asynchronously.
+- **Compaction** rewrites the per-request message list via
+  `experimental.chat.messages.transform`. This changes the request prefix
+  and so causes a deliberate, accepted prompt-cache miss at each shift, in
+  exchange for a smaller per-turn context for the rest of the new segment.
+- **Hysteresis** (`minSegmentTurns`, default 2) prevents a single
+  tangential turn from thrashing the segmentation.
+- Entirely best-effort: any failure leaves the messages untouched and the
+  conversation proceeds normally. When the flag is off, the transform hook
+  is not registered at all.
+
+Config: `enableContextCompaction` (default false), `contextDriftThreshold`,
+`contextMinObservationChars` (default 400). EXPERIMENTAL — validate the
+detector on your own transcripts (TIAGE / Pk / WindowDiff are the standard
+tools) before relying on it.
+
+## [0.0.8] — 2026-05-27
+
+Added an experimental **AST-scoped read view** (`enableAstReadView`,
+**default OFF**) and a `read_range` tool, then measured it and turned
+it off. The hypothesis: intercept the `read` tool, replace large file
+content with a compact structural view (definitions + line ranges),
+and let the agent expand sections on demand via `read_range`. The goal
+was to shrink the file content carried in the conversation so it
+re-bills less on every cached turn.
+
+**Measured net-negative.** A 20-session SWE-bench Lite run (2 instances
+× 5 runs, Sonnet 4.6) against the v0.0.7b baseline:
+
+| | v0.0.7b | v0.0.8 (on) | change |
+|---|---:|---:|---:|
+| solve rate | 10/10 | 10/10 | flat |
+| $/session (mean) | $0.178 | $0.252 | **+42 %** |
+| cache_read (mean) | 187 k | 374 k | **+100 %** |
+
+**Why it failed.** Session cost scales roughly as
+(conversation size) × (number of turns). The compressed view shrinks
+the first factor but inflates the second: the agent calls `read_range`
+to expand functions, each call is another turn, and every extra turn
+re-bills the entire cached conversation — including diane's own
+per-turn overhead (recall payload + tool descriptions), which is the
+genuinely large part. Trading conversation size for turn count loses.
+The view's `read_range(...)` hints also actively *invited* exploration:
+one run made 11 expansions across six files (including files unrelated
+to the bug), costing 1.57 M cache_read tokens in a single session.
+
+The feature is retained behind `enableAstReadView` (off) for the one
+regime where the math may flip positive — repos of very large files
+(>400 lines) where the agent makes ≤3 expansions per file — and as a
+documented record so the idea is not blindly re-attempted. The `read`
+tool's default behaviour is unchanged from v0.0.7b. See EVAL.md for
+the full diagnosis.
+
+The actionable lesson carried into the next iteration: the lever that
+moves cost is **turn count**, not file-content size. Reducing turns
+(e.g., delivering the relevant code in the same response as the recall
+that points to it) is the direction to pursue.
+
 ## [0.0.7] — 2026-05-23
 
 This release is the response to the project's first external evaluation:
@@ -18,6 +125,21 @@ with no solve-rate benefit. Its one measurable upside was a ~40 %
 wall-clock reduction on Sonnet. Tool-call traces also showed that of
 the ten `memory_*` tools, the agent only ever called three across
 all 21 diane sessions.
+
+This release rebases positioning and defaults on those measurements.
+
+### Changed — positioning
+
+- **README and WIKI rewritten** around the actual measurement. Dropped
+  the "80–89 %" headline; replaced with the per-model hit-rate /
+  $/session / wall-clock table from the SWE-bench run. The pitch is
+  now "tokens for latency, ~40 % wall-clock reduction on Sonnet at
+  ~1.8× cost premium," not "saves tokens."
+- `scripts/measure-savings.mjs` re-framed: it estimates an *upper bound*
+  of how much of a hypothetical discovery recipe the recall could
+  replace, **not** end-to-end agent cost. The script is kept for repo
+  introspection; the corroborating measurement is the SWE-bench
+  eval, not the synthetic one.
 
 ### Changed — defaults
 

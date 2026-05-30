@@ -231,6 +231,59 @@ export interface UserConfig {
    */
   enableNudgeHook?: boolean
   /**
+   * Replace `read` tool output for large source files with a compact
+   * AST-scoped structural view (definitions + line ranges), and expose a
+   * `read_range` tool for on-demand expansion. Default FALSE.
+   *
+   * MEASURED NET-NEGATIVE on the SWE-bench Lite eval (v0.0.8, 2 instances
+   * × 5 runs, Sonnet): +42% cost vs v0.0.7b at flat solve rate. The
+   * compressed view adds round-trips (the agent calls read_range to
+   * expand), and each extra turn re-bills the whole cached conversation —
+   * turns are the dominant cost multiplier, so trading conversation size
+   * for turn count loses. It can still win on repos of very large files
+   * (>400 lines) where the agent makes ≤3 expansions per file; left in,
+   * behind this flag, for that case and for further experimentation.
+   * See EVAL.md "v0.0.8" for the full diagnosis.
+   */
+  enableAstReadView?: boolean
+  /**
+   * Fused recall: memory_recall returns its routing hint PLUS the body of
+   * the single most query-relevant function from the top-ranked file, in
+   * one response. Default TRUE.
+   *
+   * Rationale: the dominant session cost is turn count (each turn re-bills
+   * the cached conversation). The locate→understand phase normally costs
+   * the agent several turns (recall → read → scan → read). Fusing the
+   * relevant code into the recall response collapses that to one turn.
+   * Capped at `fuseRecallMaxLines` (default 150); larger functions fall
+   * back to pointer-only so the response never balloons — the explicit
+   * inverse of the v0.0.8 read-view mistake (which fragmented reads ACROSS
+   * turns). See EVAL.md.
+   */
+  fuseRecallBody?: boolean
+  /** Max function-body lines to fuse into a recall response. Default 150. */
+  fuseRecallMaxLines?: number
+  /**
+   * Goal-shift context compaction. When the conversation's goal shifts
+   * significantly, mask the stale span's tool observations (file reads,
+   * command output) — keeping reasoning intact — and re-insert them if the
+   * goal later drifts back. Default FALSE.
+   *
+   * This deliberately accepts a prompt-cache miss at each shift (the
+   * rewritten message prefix), in exchange for a smaller per-turn context
+   * for the rest of the new segment. Detection reuses the e5 embedder when
+   * semantic search is on, else a local lexical-cohesion signal. Originals
+   * are stashed (and independently re-fetchable), so a premature
+   * compaction is recoverable — the defence against "summarization drift".
+   * EXPERIMENTAL; off by default; verify on your own transcripts first.
+   */
+  enableContextCompaction?: boolean
+  /** Cosine similarity at/below which a turn starts a new goal segment.
+   *  Lexical backend default 0.20; embedding backend default 0.55. */
+  contextDriftThreshold?: number
+  /** Minimum tool-output chars worth masking. Default 400. */
+  contextMinObservationChars?: number
+  /**
    * Expose the full memory_* tool surface to the agent. Default FALSE.
    *
    * The 40-session SWE-bench Lite eval (2 instances × 5 runs × 2
@@ -386,6 +439,12 @@ export interface ResolvedConfig {
   notesMaxBytes: number
   coChangeMinOccurrences: number
   enableNudgeHook: boolean
+  enableAstReadView: boolean
+  fuseRecallBody: boolean
+  fuseRecallMaxLines: number
+  enableContextCompaction: boolean
+  contextDriftThreshold?: number
+  contextMinObservationChars: number
   exposeOpsTools: boolean
   adaptive: boolean
   enableSemanticSearch: boolean

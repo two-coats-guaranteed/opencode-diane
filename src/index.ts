@@ -27,7 +27,14 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
 import { readFileSync } from "node:fs"
-import { dirname, isAbsolute, join } from "node:path"
+import { dirname, isAbsolute, join, resolve } from "node:path"
+import { getReadView, onFileEdited as onFileEditedView, isViewStale, extractRelevantFunction } from "./read-view.js"
+import {
+  CompactionManager,
+  DEFAULT_COMPACTION_CONFIG,
+  type CompactionConfig,
+} from "./context/compaction-manager.js"
+import type { MsgLike } from "./context/compactor.js"
 import { fileURLToPath } from "node:url"
 
 import { MemoryRepository } from "./store/repository.js"
@@ -680,7 +687,32 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
               ? Number((hits[0].score / hits[1].score).toFixed(2))
               : null
 
-            return `Start here:\n${lines.join("\n")}`
+            // Fused recall: append the body of the most query-relevant
+            // function from the top file, so the agent gets pointer + code
+            // in ONE turn rather than spending separate read turns. Capped
+            // at fuseRecallMaxLines; larger functions fall back to
+            // pointer-only. This deliberately inverts the v0.0.8 read-view
+            // approach (which fragmented reads across turns) — here we
+            // front-load the relevant code into a single response, because
+            // turn count, not response size, is the dominant cost.
+            let fusedBlock = ""
+            if (config.fuseRecallBody && topFile) {
+              try {
+                const absTop = isAbsolute(topFile) ? topFile : join(root, topFile)
+                const fn = extractRelevantFunction(absTop, args.query, config.fuseRecallMaxLines)
+                if (fn) {
+                  fusedBlock =
+                    `\n\n--- ${topFile}  lines ${fn.start}-${fn.end} ` +
+                    `(most relevant to your query — read the file for full context) ---\n` +
+                    fn.bodyText
+                  summary.fused = `${topFile}:${fn.start}-${fn.end}`
+                }
+              } catch {
+                /* fusion is best-effort — pointer-only on any failure */
+              }
+            }
+
+            return `Start here:\n${lines.join("\n")}${fusedBlock}`
           } catch (e) {
             error = e instanceof Error ? e.message : String(e)
             throw e
@@ -812,6 +844,40 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
           } finally {
             recordToolCall("memory_outline", {}, t0, summary, error)
           }
+        },
+      }),
+
+      read_range: tool({
+        description:
+          "Read a specific line range from a file. " +
+          "Use when a compressed file view (from the `read` tool) shows a " +
+          "function or class you want to inspect — pass the start and end " +
+          "line numbers shown in the compressed view. " +
+          "More efficient than re-reading the entire file. " +
+          "Note: if the file has been edited since you last read it, " +
+          "line numbers from the previous view may have shifted — " +
+          "re-read the file with `read` to get current line numbers.",
+        args: {
+          file:  tool.schema.string().describe("relative file path"),
+          start: tool.schema.number().int().min(1).describe("start line (1-based, inclusive)"),
+          end:   tool.schema.number().int().min(1).describe("end line (1-based, inclusive)"),
+        },
+        async execute(args, ctx: { sessionID?: string } | undefined) {
+          const abs = isAbsolute(args.file) ? args.file : join(root, args.file)
+          const src = readFileSync(abs, "utf8")
+          const lines = src.split("\n")
+          const s = Math.max(0, args.start - 1)
+          const e = Math.min(lines.length - 1, args.end - 1)
+          const result = lines.slice(s, e + 1).join("\n")
+          const stale = isViewStale(ctx?.sessionID ?? "_", abs)
+          const header = stale
+            ? `${args.file} [lines ${args.start}–${args.end}]:\n` +
+              `[WARNING: this file was edited since you last viewed it — ` +
+              `the line numbers from the previous compressed view may have ` +
+              `shifted. If the content below looks wrong, re-read the file ` +
+              `to get the current line layout.]\n`
+            : `${args.file} [lines ${args.start}–${args.end}]:\n`
+          return header + result
         },
       }),
 
@@ -1237,13 +1303,34 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
 
   // Default registration: only the three tools the eval showed the
   // agent calls. `exposeOpsTools: true` widens to everything above.
-  const exposedTools: Partial<AllTools> = config.exposeOpsTools
+  const baseTools: Partial<AllTools> = config.exposeOpsTools
     ? allTools
     : {
         memory_recall:   allTools.memory_recall,
         memory_outline:  allTools.memory_outline,
         memory_remember: allTools.memory_remember,
       }
+  // read_range only makes sense alongside the AST read view (off by default).
+  const exposedTools: Partial<AllTools> = config.enableAstReadView
+    ? { ...baseTools, read_range: allTools.read_range }
+    : Object.fromEntries(
+        Object.entries(baseTools).filter(([k]) => k !== "read_range")
+      ) as Partial<AllTools>
+
+  // Goal-shift context compaction — off by default. Constructed once;
+  // holds per-session detector + archive state. Lexical backend (always
+  // available, zero-dependency, strong in the coding domain). The embedding
+  // backend exists and is unit-tested but is not wired into the live hot
+  // path here because the e5 model loads asynchronously.
+  const compactionManager = config.enableContextCompaction
+    ? new CompactionManager({
+        ...DEFAULT_COMPACTION_CONFIG,
+        ...(config.contextDriftThreshold !== undefined
+          ? { driftThreshold: config.contextDriftThreshold }
+          : {}),
+        minObservationChars: config.contextMinObservationChars,
+      } satisfies CompactionConfig)
+    : undefined
 
   return {
     tool: exposedTools,
@@ -1331,7 +1418,7 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
       }
     },
     "tool.execute.after": async (
-      input: { tool: string; callID?: string },
+      input: { tool: string; callID?: string; sessionID?: string; args?: Record<string, unknown> },
       output: { title: string; output: string; metadata: unknown }
     ) => {
       const name = input?.tool ?? ""
@@ -1344,6 +1431,15 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
         if (fp !== undefined) {
           pendingEditPaths.delete(key)
           await refreshCodeMapAfterEdit(fp)
+          // Evict the frozen read-view so the next read of this file
+          // regenerates the compressed view against the post-edit content.
+          // (Only relevant when the AST read view is enabled.)
+          if (config.enableAstReadView) {
+            try {
+              const absEd = isAbsolute(fp) ? fp : join(root, fp)
+              onFileEditedView(input?.sessionID ?? "_", absEd)
+            } catch { /* cache eviction is best-effort */ }
+          }
           // (1a) Live session recording — feed the recorder the edit.
           //      Wrapped — a failed live recording is not worth
           //      interrupting the agent. Recorder.flush() upserts ONE
@@ -1439,7 +1535,85 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
           /* a nudge is never worth an exception */
         }
       }
+
+      // AST-scoped read interception — OFF by default (config.enableAstReadView).
+      //
+      // Replaces large file content with a compact structural view. MEASURED
+      // NET-NEGATIVE (v0.0.8 eval: +42% cost, flat solve rate) — the
+      // compressed view adds read_range round-trips and each extra turn
+      // re-bills the whole cached conversation. Retained behind the flag for
+      // very-large-file repos. See EVAL.md "v0.0.8".
+      if (config.enableAstReadView && name === "read") {
+        try {
+          if (typeof output?.output !== "string") return
+          const fp = input?.args?.filePath as string | undefined
+          if (!fp) return
+          const abs = isAbsolute(fp) ? fp : resolve(root, fp)
+          if (!abs.startsWith(root)) return  // only files inside the repo
+          const view = getReadView(input?.sessionID ?? "_", abs, root)
+          if (view !== null) {
+            // Preserve OpenCode's XML wrapper (<path>, <type>) but replace
+            // the <content> block with our compressed view.
+            const orig = output.output
+            const cStart = orig.indexOf("<content>")
+            const cEnd   = orig.lastIndexOf("</content>")
+            if (cStart !== -1 && cEnd !== -1) {
+              output.output =
+                orig.slice(0, cStart + "<content>\n".length) +
+                view + "\n" +
+                orig.slice(cEnd)
+            } else {
+              output.output = view
+            }
+          }
+        } catch {
+          /* read compression must never break a tool call */
+        }
+      }
     },
+
+    // Goal-shift context compaction (off by default). Runs at request
+    // assembly: when the latest user turn signals the conversation's goal
+    // has shifted, mask the stale span's tool observations (keeping
+    // reasoning), and re-insert an archived segment's observations if the
+    // goal has drifted back. Mutating `output.messages` here changes the
+    // request prefix — a deliberate, accepted prompt-cache miss at each
+    // shift. Entirely best-effort: any failure leaves the messages
+    // untouched and the conversation proceeds normally.
+    ...(compactionManager
+      ? {
+          "experimental.chat.messages.transform": async (
+            _input: unknown,
+            output: { messages: MsgLike[] }
+          ) => {
+            try {
+              if (!output || !Array.isArray(output.messages)) return
+              // sessionID isn't on the transform input; derive a stable key
+              // from the first message's session if present, else "_".
+              const sid =
+                (output.messages[0]?.info as { sessionID?: string } | undefined)
+                  ?.sessionID ?? "_"
+              const r = await compactionManager.onTransform(sid, output.messages)
+              if (r.shifted && (r.masked > 0 || r.restored > 0)) {
+                log(
+                  "info",
+                  `context: goal shift (sim=${r.similarity.toFixed(2)}) — ` +
+                    `masked ${r.masked} observation(s) ~${r.tokensSaved} tok, ` +
+                    `restored ${r.restored}`
+                )
+                event("context.compacted", {
+                  masked: r.masked,
+                  restored: r.restored,
+                  tokensSaved: r.tokensSaved,
+                  similarity: r.similarity,
+                })
+              }
+            } catch {
+              /* compaction must never break the conversation */
+            }
+          },
+        }
+      : {}),
   }
 }
 
@@ -1712,6 +1886,12 @@ function coerceUserConfig(options: unknown): UserConfig {
   num("codeMapMaxFiles")
   num("coChangeMaxCommits")
   bool("enableNudgeHook")
+  bool("enableAstReadView")
+  bool("fuseRecallBody")
+  num("fuseRecallMaxLines")
+  bool("enableContextCompaction")
+  num("contextDriftThreshold")
+  num("contextMinObservationChars")
   bool("exposeOpsTools")
   bool("adaptive")
   bool("enableSemanticSearch")
@@ -1756,6 +1936,12 @@ function resolveConfig(user: UserConfig): ResolvedConfig {
     notesMaxBytes:            Math.max(256, Math.round(user.notesMaxBytes ?? 6144)),
     coChangeMinOccurrences:   Math.max(1, Math.round(user.coChangeMinOccurrences ?? 3)),
     enableNudgeHook: user.enableNudgeHook ?? true,
+    enableAstReadView: user.enableAstReadView ?? false,
+    fuseRecallBody: user.fuseRecallBody ?? true,
+    fuseRecallMaxLines: Math.max(20, Math.round(user.fuseRecallMaxLines ?? 150)),
+    enableContextCompaction: user.enableContextCompaction ?? false,
+    contextDriftThreshold: user.contextDriftThreshold,
+    contextMinObservationChars: Math.max(1, Math.round(user.contextMinObservationChars ?? 400)),
     exposeOpsTools: user.exposeOpsTools ?? false,
     adaptive: user.adaptive ?? true,
     enableSemanticSearch: user.enableSemanticSearch ?? false,

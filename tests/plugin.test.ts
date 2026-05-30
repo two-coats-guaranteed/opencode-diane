@@ -73,8 +73,8 @@ async function main(): Promise<void> {
   const nodeHooks = await OpencodeDiane(mockCtx(nodeRoot, nodeLogs))
   await new Promise((r) => setTimeout(r, 400))
   assert(
-    nodeHooks.tool !== undefined && Object.keys(nodeHooks.tool).length === 10,
-    "Node project (manifest, no git) activates with all ten tools"
+    nodeHooks.tool !== undefined && Object.keys(nodeHooks.tool).length === 3,
+    "Node project (manifest, no git) activates with the 3 default tools"
   )
   await rm(nodeRoot, { recursive: true, force: true })
 
@@ -187,6 +187,31 @@ async function main(): Promise<void> {
 
   await rm(root, { recursive: true, force: true })
 
+  // ── AST read-view flag (off by default, opt-in) ────────────────────
+  console.log("\n── plugin: enableAstReadView gates read_range ─────────────")
+  {
+    const arRoot = await mkdtemp(join(tmpdir(), "diane-mem-plug-astread-"))
+    await writeFile(join(arRoot, "package.json"), '{"name":"ar"}')
+
+    // default: read_range NOT registered
+    const offHooks = await OpencodeDiane(mockCtx(arRoot, []))
+    await new Promise((r) => setTimeout(r, 200))
+    assert(
+      offHooks.tool !== undefined && !("read_range" in offHooks.tool),
+      "read_range absent by default (AST read view off)"
+    )
+
+    // opt-in: read_range registered
+    const onHooks = await OpencodeDiane(mockCtx(arRoot, []), { enableAstReadView: true })
+    await new Promise((r) => setTimeout(r, 200))
+    assert(
+      onHooks.tool !== undefined && "read_range" in onHooks.tool,
+      "read_range present when enableAstReadView=true"
+    )
+
+    await rm(arRoot, { recursive: true, force: true })
+  }
+
   // ── recall-first nudge hooks ───────────────────────────────────────
   console.log("\n── plugin: recall-first nudge ────────────────────────────")
   const nRoot = await mkdtemp(join(tmpdir(), "diane-mem-plug-nudge-"))
@@ -273,8 +298,8 @@ async function main(): Promise<void> {
     "enableNudgeHook:false → nudge is suppressed even after discovery calls"
   )
   assert(
-    offHooks.tool !== undefined && Object.keys(offHooks.tool).length === 10,
-    "enableNudgeHook:false still registers all ten tools"
+    offHooks.tool !== undefined && Object.keys(offHooks.tool).length === 3,
+    "enableNudgeHook:false still registers the 3 default tools"
   )
 
   // default (no options) keeps the hooks on
