@@ -28,13 +28,15 @@ import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
 import { readFileSync } from "node:fs"
 import { dirname, isAbsolute, join, resolve } from "node:path"
-import { getReadView, onFileEdited as onFileEditedView, isViewStale, extractRelevantFunction } from "./read-view.js"
+import { getReadView, onFileEdited as onFileEditedView, isViewStale, extractRelevantFunction, extractFunctionChunks } from "./read-view.js"
+import { rerankWindowByScore } from "./search/per-function.js"
 import {
-  CompactionManager,
-  DEFAULT_COMPACTION_CONFIG,
-  type CompactionConfig,
-} from "./context/compaction-manager.js"
-import type { MsgLike } from "./context/compactor.js"
+  noteUsefulFile as wsNoteUseful,
+  noteQueryAndMaybeFlush,
+  decaySession,
+  workingSet,
+  computeBoostedScores,
+} from "./session/working-set.js"
 import { fileURLToPath } from "node:url"
 
 import { MemoryRepository } from "./store/repository.js"
@@ -59,7 +61,8 @@ import { detectPeerPlugins } from "./utils/peer-detection.js"
 import { installUsageSkill } from "./utils/usage-skill.js"
 import { mineSkills, readMinedSkills } from "./mining/skill-miner.js"
 import { LiveSessionRecorder } from "./ingest/live-session.js"
-import type { Category, ResolvedConfig, UserConfig } from "./types.js"
+import { recordFunctionTrace, lookupFunctionTrace } from "./ingest/function-trace.js"
+import type { Category, ResolvedConfig, UserConfig, RecallHit } from "./types.js"
 
 const SERVICE = "opencode-diane"
 
@@ -265,6 +268,11 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
   let memoryToolUsed = false
   let discoveryCallCount = 0
   let nudgeShown = false
+  // Session-provenance: the most recent recall's query + the file/function
+  // it pointed at. When an edit then lands on that file, we record that the
+  // agent worked on that function, reached via that query (the recall→edit
+  // causal link). Reset implicitly by being overwritten on each recall.
+  let lastRecall: { query: string; topFile: string; topFunction: string | null; by: string } | undefined
 
   // ── Code-map freshness (independent of the nudge) ─────────────────
   // When the agent edits code, the edited file's code-map memory must
@@ -560,6 +568,15 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
           "Skip only when the user has already named a specific file path.",
         args: {
           query: tool.schema.string().describe("Free-form search query — words, file paths, identifiers."),
+          by: tool.schema
+            .string()
+            .optional()
+            .describe(
+              "How to match, default 'name'. Use 'name' when your query contains exact " +
+                "things you already know — a function, class, file name, or a literal error " +
+                "message. Use 'meaning' when you're describing what the code does, or the bug, " +
+                "in plain words and don't have the exact names yet."
+            ),
           category: tool.schema.string().optional().describe("Optional category filter."),
           subject: tool.schema.string().optional().describe("Optional subject filter (file path, task slug, etc.)."),
           limit: tool.schema.number().optional().describe("Hard cap on hit count considered. Default 25."),
@@ -583,6 +600,9 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
           const t0 = performance.now()
           const summary: Record<string, unknown> = {}
           let error: string | undefined
+          // Session key for the working-set prior — the plugin-closure id, so
+          // the recall (boost) side and the edit (update) side share a key.
+          const wsSessionId = sessionIdForRecorder ?? "_"
           try {
             const cat = isCategory(args.category) ? args.category : undefined
             const prefer =
@@ -594,13 +614,20 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
                 : undefined
             const formatHit = (h: { memory: { category: string; subject: string; content: string }; score: number }): string =>
               `[${h.memory.category} | ${h.memory.subject} | score ${h.score.toFixed(2)}] ${h.memory.content}`
-            // When semantic search is on and the model is ready, embed
-            // the query so recall can fuse vector similarity with BM25.
-            // The embedding is done here, in the async tool handler, so
-            // the recall path itself stays synchronous. A failure falls
-            // back to lexical-only — it never fails the recall.
+            // Match mode (default 'name'). 'name' = pure lexical (BM25 +
+            // git-history), the robust default that won the ranking eval.
+            // 'meaning' additionally blends vector similarity for plain-
+            // English queries where exact identifiers aren't known. Putting
+            // the embedding behind the flag also skips its cost on the
+            // common name-queries.
+            const by = args.by === "meaning" ? "meaning" : "name"
+            // When the model asks to match by meaning and the semantic model
+            // is ready, embed the query so recall can fuse vector similarity
+            // with BM25. Done here in the async handler so the recall path
+            // stays synchronous. A failure falls back to lexical — it never
+            // fails the recall. Match by name never embeds.
             let queryVector: Float32Array | undefined
-            if (embedder) {
+            if (by === "meaning" && embedder) {
               try {
                 queryVector = await embedder.embedQuery(args.query)
               } catch (e) {
@@ -629,9 +656,115 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
             summary.category = cat ?? null
             summary.prefer = prefer ?? null
             summary.semantic = queryVector !== undefined
+            summary.by = by
             summary.hadSubject = args.subject !== undefined
             summary.tokenBudget = args.tokenBudget ?? 1200
             if (hits.length === 0) return "(no memories matched)"
+
+            // Session working-set prior (default ON, instrumented). As the
+            // agent works, files whose recall it then edited (recall.useful)
+            // form a per-session working set; we boost the current recall
+            // toward those files and their co-change neighbours, so finding one
+            // file of a multi-file change surfaces the rest. Strength decays
+            // each recall; a query-topic shift flushes the set. Empty/decayed
+            // set => no boost => plain BM25+history. Unlike the reranker this is
+            // NOT recall-safe (it can inject a neighbour from outside the top-5
+            // — that is the point), so it is monitored via summary.wsBoost and
+            // can be disabled with enableSessionWorkingSet.
+            let ranked = hits
+            if (config.enableSessionWorkingSet) {
+              try {
+                noteQueryAndMaybeFlush(wsSessionId, args.query)
+                decaySession(wsSessionId)
+                const ws = workingSet(wsSessionId)
+                if (ws.size > 0) {
+                  const idx = repo["index"] as
+                    | { coChangeNeighbors?: (f: string) => Iterable<string> | undefined; bySubject?: Map<string, Set<string>> }
+                    | undefined
+                  const byId = repo["byId"] as Map<string, RecallHit["memory"]> | undefined
+                  const base = new Map<string, number>()
+                  for (const h of hits) base.set(h.memory.subject, h.score)
+                  const boosted = computeBoostedScores(base, ws, (f) => idx?.coChangeNeighbors?.(f))
+                  const bySubject = new Map<string, RecallHit>()
+                  for (const h of hits) bySubject.set(h.memory.subject, h)
+                  const orderedSubjects = [...boosted.entries()].sort((a, b) => b[1] - a[1]).map(([s]) => s)
+                  const rebuilt: RecallHit[] = []
+                  let injected = 0
+                  for (const subj of orderedSubjects) {
+                    const existing = bySubject.get(subj)
+                    if (existing) {
+                      rebuilt.push({ memory: existing.memory, score: boosted.get(subj) as number })
+                      continue
+                    }
+                    // injected co-change neighbour not retrieved by lexical
+                    // search — fetch its code-map memory to surface it.
+                    const ids = idx?.bySubject?.get(subj)
+                    const mem = ids ? byId?.get([...ids][0]) : undefined
+                    if (mem && mem.category === "code-map") {
+                      rebuilt.push({ memory: mem, score: boosted.get(subj) as number })
+                      injected += 1
+                    }
+                  }
+                  if (rebuilt.length > 0) {
+                    ranked = rebuilt
+                    summary.wsBoost = ws.size
+                    summary.wsInjected = injected
+                  }
+                }
+              } catch {
+                /* working-set prior is best-effort — fall back to lexical order */
+              }
+            }
+
+            // R@1 rerank (gated, default-off, meaning-mode only). The right
+            // file is usually retrieved but mis-ranked (R@10 >> R@1), so we
+            // reorder the top window's FILE candidates by per-function
+            // embedding similarity. Window-limited (semanticRerankWindow),
+            // which provably cannot reduce Recall@5 (only the top-W positions
+            // are permuted — see rerankWindowByScore). Reuses the query vector
+            // already computed for meaning mode and embeds only the window's
+            // candidate files' functions, so it is cheap. Repo-dependent and
+            // not yet validated end-to-end with the live embedder — OFF by
+            // default; enable to evaluate. Operates on the working-set-boosted
+            // order so the two compose.
+            if (config.semanticRerank && by === "meaning" && queryVector && embedder) {
+              try {
+                const isFileSubj = (s: string): boolean => s.includes(".") && !s.includes(":")
+                const qv = queryVector
+                const norm = (v: Float32Array): number => Math.sqrt(v.reduce((a, x) => a + x * x, 0)) || 1
+                const qn = norm(qv)
+                const cos = (v: Float32Array): number => {
+                  let d = 0
+                  for (let i = 0; i < v.length && i < qv.length; i++) d += v[i] * qv[i]
+                  return d / (qn * norm(v))
+                }
+                const score = new Map<string, number>()
+                const W = config.semanticRerankWindow
+                for (let i = 0; i < Math.min(W, ranked.length); i++) {
+                  const subj = ranked[i].memory.subject
+                  if (!isFileSubj(subj)) continue
+                  const abs = isAbsolute(subj) ? subj : join(root, subj)
+                  const chunks = extractFunctionChunks(abs)
+                  if (chunks.length === 0) continue
+                  const vecs = await embedder.embedPassages(chunks.map((c) => `${subj} ${c.sig}\n${c.text}`))
+                  let best = -Infinity
+                  for (const v of vecs) {
+                    const s = cos(v)
+                    if (s > best) best = s
+                  }
+                  if (best > -Infinity) score.set(subj, best)
+                }
+                ranked = rerankWindowByScore(
+                  ranked,
+                  W,
+                  (h) => isFileSubj(h.memory.subject),
+                  (h) => score.get(h.memory.subject)
+                )
+                summary.reranked = score.size
+              } catch {
+                /* rerank is best-effort — fall back to lexical order */
+              }
+            }
 
             // Routing-hint format: always brief, always actionable.
             //
@@ -649,7 +782,7 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
             //
             // Co-change partners are listed so the agent knows related
             // files to check if the top file isn't the right one.
-            const topHits = hits.slice(0, Math.min(3, hits.length))
+            const topHits = ranked.slice(0, Math.min(3, ranked.length))
             const lines: string[] = []
             for (let i = 0; i < topHits.length; i++) {
               const h = topHits[i]
@@ -669,7 +802,6 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
 
             // Co-change partners from the top hit (routing context).
             const topFile = topHits[0]?.memory.subject ?? ""
-            const topFileBase = topFile.split("/").pop() ?? topFile
             const neighbors = repo["index"]?.coChangeNeighbors?.(topFile)
             if (neighbors && neighbors.size > 0) {
               const sorted = Array.from(neighbors)
@@ -696,6 +828,7 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
             // front-load the relevant code into a single response, because
             // turn count, not response size, is the dominant cost.
             let fusedBlock = ""
+            let fusedFnSig: string | null = null
             if (config.fuseRecallBody && topFile) {
               try {
                 const absTop = isAbsolute(topFile) ? topFile : join(root, topFile)
@@ -706,13 +839,38 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
                     `(most relevant to your query — read the file for full context) ---\n` +
                     fn.bodyText
                   summary.fused = `${topFile}:${fn.start}-${fn.end}`
+                  fusedFnSig = fn.sig
                 }
               } catch {
                 /* fusion is best-effort — pointer-only on any failure */
               }
             }
 
-            return `Start here:\n${lines.join("\n")}${fusedBlock}`
+            // Session provenance (retrieval side): if a previous agent
+            // session worked on the function this recall surfaces, fuse that
+            // history in — the agent-session analogue of a blame commit's
+            // message. Additive; failure falls back to no provenance line.
+            let provenanceBlock = ""
+            if (config.enableSessionProvenance && topFile) {
+              try {
+                const prior = lookupFunctionTrace(repo, topFile, fusedFnSig)
+                if (prior) {
+                  provenanceBlock = `\n\n--- prior work here ---\n${prior}`
+                  summary.provenance = true
+                }
+              } catch {
+                /* provenance is best-effort */
+              }
+            }
+
+            // Session provenance (capture side): remember what this recall
+            // pointed at, so a subsequent edit to topFile can be linked back
+            // to this query + function.
+            if (config.enableSessionProvenance && topFile) {
+              lastRecall = { query: args.query, topFile, topFunction: fusedFnSig, by }
+            }
+
+            return `Start here:\n${lines.join("\n")}${fusedBlock}${provenanceBlock}`
           } catch (e) {
             error = e instanceof Error ? e.message : String(e)
             throw e
@@ -1317,21 +1475,6 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
         Object.entries(baseTools).filter(([k]) => k !== "read_range")
       ) as Partial<AllTools>
 
-  // Goal-shift context compaction — off by default. Constructed once;
-  // holds per-session detector + archive state. Lexical backend (always
-  // available, zero-dependency, strong in the coding domain). The embedding
-  // backend exists and is unit-tested but is not wired into the live hot
-  // path here because the e5 model loads asynchronously.
-  const compactionManager = config.enableContextCompaction
-    ? new CompactionManager({
-        ...DEFAULT_COMPACTION_CONFIG,
-        ...(config.contextDriftThreshold !== undefined
-          ? { driftThreshold: config.contextDriftThreshold }
-          : {}),
-        minObservationChars: config.contextMinObservationChars,
-      } satisfies CompactionConfig)
-    : undefined
-
   return {
     tool: exposedTools,
 
@@ -1453,6 +1596,41 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
               /* live-trace recording is best-effort */
             }
           }
+          // (1c) Session provenance — if a recall in this session pointed
+          //      at THIS file, the agent is now acting on it: record that
+          //      it worked on that function, reached via that recall query
+          //      (the recall→edit causal link). Precise by construction —
+          //      no recall→file match means no trace, so we never record
+          //      noise from edits the agent made without consulting recall.
+          if (config.enableSessionProvenance && lastRecall) {
+            try {
+              const editedBase = fp.split("/").pop() ?? fp
+              const recalledBase = lastRecall.topFile.split("/").pop() ?? lastRecall.topFile
+              if (editedBase === recalledBase) {
+                recordFunctionTrace(repo, {
+                  sessionId: input?.sessionID ?? "_",
+                  filePath: lastRecall.topFile,
+                  functionSig: lastRecall.topFunction,
+                  recallQuery: lastRecall.query,
+                })
+                // #3 passive mode-selection harvest: a recall whose file the
+                // agent then edited is a "useful" recall. Emitting the mode
+                // here (numerator) against summary.by on every recall
+                // (denominator, already logged via recordToolCall) lets us
+                // later compute a name-vs-meaning usefulness rate from the
+                // event stream — no store pollution, no extra study needed.
+                event("recall.useful", { by: lastRecall.by, file: lastRecall.topFile })
+                // Session working-set prior: the edited file is the agent's
+                // current locus — add it so subsequent recalls (and its
+                // co-change neighbours) are boosted toward it this session.
+                if (config.enableSessionWorkingSet) {
+                  wsNoteUseful(sessionIdForRecorder ?? "_", lastRecall.topFile)
+                }
+              }
+            } catch {
+              /* provenance recording is best-effort */
+            }
+          }
         }
       } catch {
         /* a stale-index refresh must never break a tool call */
@@ -1572,48 +1750,6 @@ export const OpencodeDiane: Plugin = async (ctx, options) => {
       }
     },
 
-    // Goal-shift context compaction (off by default). Runs at request
-    // assembly: when the latest user turn signals the conversation's goal
-    // has shifted, mask the stale span's tool observations (keeping
-    // reasoning), and re-insert an archived segment's observations if the
-    // goal has drifted back. Mutating `output.messages` here changes the
-    // request prefix — a deliberate, accepted prompt-cache miss at each
-    // shift. Entirely best-effort: any failure leaves the messages
-    // untouched and the conversation proceeds normally.
-    ...(compactionManager
-      ? {
-          "experimental.chat.messages.transform": async (
-            _input: unknown,
-            output: { messages: MsgLike[] }
-          ) => {
-            try {
-              if (!output || !Array.isArray(output.messages)) return
-              // sessionID isn't on the transform input; derive a stable key
-              // from the first message's session if present, else "_".
-              const sid =
-                (output.messages[0]?.info as { sessionID?: string } | undefined)
-                  ?.sessionID ?? "_"
-              const r = await compactionManager.onTransform(sid, output.messages)
-              if (r.shifted && (r.masked > 0 || r.restored > 0)) {
-                log(
-                  "info",
-                  `context: goal shift (sim=${r.similarity.toFixed(2)}) — ` +
-                    `masked ${r.masked} observation(s) ~${r.tokensSaved} tok, ` +
-                    `restored ${r.restored}`
-                )
-                event("context.compacted", {
-                  masked: r.masked,
-                  restored: r.restored,
-                  tokensSaved: r.tokensSaved,
-                  similarity: r.similarity,
-                })
-              }
-            } catch {
-              /* compaction must never break the conversation */
-            }
-          },
-        }
-      : {}),
   }
 }
 
@@ -1889,12 +2025,13 @@ function coerceUserConfig(options: unknown): UserConfig {
   bool("enableAstReadView")
   bool("fuseRecallBody")
   num("fuseRecallMaxLines")
-  bool("enableContextCompaction")
-  num("contextDriftThreshold")
-  num("contextMinObservationChars")
+  bool("enableSessionProvenance")
   bool("exposeOpsTools")
   bool("adaptive")
   bool("enableSemanticSearch")
+  bool("semanticRerank")
+  num("semanticRerankWindow")
+  bool("enableSessionWorkingSet")
   str("embeddingModel")
   bool("personalizedPageRank")
   bool("recordSessionActivity")
@@ -1939,12 +2076,13 @@ function resolveConfig(user: UserConfig): ResolvedConfig {
     enableAstReadView: user.enableAstReadView ?? false,
     fuseRecallBody: user.fuseRecallBody ?? true,
     fuseRecallMaxLines: Math.max(20, Math.round(user.fuseRecallMaxLines ?? 150)),
-    enableContextCompaction: user.enableContextCompaction ?? false,
-    contextDriftThreshold: user.contextDriftThreshold,
-    contextMinObservationChars: Math.max(1, Math.round(user.contextMinObservationChars ?? 400)),
+    enableSessionProvenance: user.enableSessionProvenance ?? true,
     exposeOpsTools: user.exposeOpsTools ?? false,
     adaptive: user.adaptive ?? true,
     enableSemanticSearch: user.enableSemanticSearch ?? false,
+    semanticRerank: user.semanticRerank ?? false,
+    semanticRerankWindow: Math.max(2, Math.round(user.semanticRerankWindow ?? 3)),
+    enableSessionWorkingSet: user.enableSessionWorkingSet ?? true,
     embeddingModel: user.embeddingModel ?? DEFAULT_EMBEDDING_MODEL,
     personalizedPageRank: user.personalizedPageRank ?? false,
     recordSessionActivity: user.recordSessionActivity ?? true,
@@ -2026,6 +2164,7 @@ function isCategory(s: string | undefined): s is Category {
     s === "code-map" ||
     s === "session-trace" ||
     s === "session-snapshot" ||
+    s === "function-trace" ||
     s === "agent-note" ||
     s === "skill-mined" ||
     s === "custom"

@@ -13,6 +13,39 @@ Named for Diane in *Twin Peaks* — the recipient of Dale Cooper's
 recorded case notes. The plugin works the same way: it keeps the
 record of what your coding agent learns about a codebase.
 
+## What it actually does — and what it costs
+
+These numbers are from a 40-session controlled eval: 2 SWE-bench Lite
+instances (`psf__requests-1963`, `pylint-dev__pylint-6506`), 5 runs
+per condition × 2 models (Haiku 4.5, Sonnet 4.6), file-level diff
+overlap as the metric.
+
+| Model | Condition | hit-rate | $/session | wall-clock |
+|---|---:|---:|---:|---:|
+| **Sonnet 4.6** | diane | 9/10 (90 %) | $0.182 | **61 s** |
+| **Sonnet 4.6** | baseline | 9/10 (90 %) | $0.100 | 104 s |
+| Haiku 4.5 | diane | 5/10 (50 %) | $0.156 | 80 s |
+| Haiku 4.5 | baseline | 5/9 (56 %) | $0.082 | 85 s |
+
+The honest read:
+
+- **Solve-rate.** No measurable benefit on this slice. Both conditions
+  hit 9/10 on Sonnet and 5/10 vs 5/9 on Haiku.
+- **Wall-clock.** Diane on Sonnet is **~40 % faster** — 61 s vs 104 s
+  average. On `requests-1963` specifically, 37 s vs 110 s. The recall
+  surfaces the right file faster than the agent finds it by grep.
+- **Cost.** Diane is **~1.8× more expensive per session** at both
+  models (the ratio holds across Sonnet and Haiku). Cost comes from
+  tool descriptions in the system prompt and from recall results that
+  linger in conversation history.
+- **Trade.** *Tokens for latency.* If your bottleneck is developer
+  wait-time on agent runs, that trade may be worth it. If your
+  bottleneck is API spend on bulk runs, it isn't.
+
+Caveats: **n = 2 instances**, both small Python libraries. File-level
+overlap, not test-pass. Not benchmarked against agentmemory or aider.
+A 30-instance, multi-repo eval is in the roadmap. See `EVAL.md` for
+the harness and raw session traces.
 
 ## What it is, mechanically
 
@@ -64,7 +97,7 @@ decision-maker*.
 
 | Tool | What it does |
 |---|---|
-| `memory_recall` | BM25 search over the store — co-change-boosted, token-budgeted, with optional `category` / `subject` filters. The recall-first entry point. |
+| `memory_recall` | BM25 search over the store — co-change-boosted, token-budgeted, with optional `category` / `subject` filters. The recall-first entry point. Takes an optional `by`: `"name"` (default) for exact matches you already know — a function, class, file, or error message — or `"meaning"` to also blend semantic similarity for plain-English descriptions of what code does. |
 | `memory_code_map` | Aider-style structural map: per-file signatures of functions/classes/types, ranked and budgeted. Needs `enableCodeMap`. |
 | `memory_remember` | Store an explicit note for future turns. |
 | `memory_snapshot` | Record this session's *understanding* — mental model, decisions, conventions — for a later or parallel session to resume from. |
@@ -162,6 +195,10 @@ interface UserConfig {
   enableSemanticSearch?: boolean // default false (see WIKI: Semantic search)
   embeddingModel?: string        // default "Xenova/multilingual-e5-small"
   personalizedPageRank?: boolean // default false (co-change ranking; see WIKI)
+  enableSessionProvenance?: boolean    // default true  — record the recall→edit causal link
+  enableSessionWorkingSet?: boolean    // default true  — adapt recall to the active task within a session
+  semanticRerank?: boolean             // default false — EXPERIMENTAL: rerank meaning-mode top results by per-function embedding (R@1). Not yet live-validated.
+  semanticRerankWindow?: number        // default 3     — window size for the meaning-mode rerank
   recordSessionActivity?: boolean      // default true  — record this session's edits + bash as a rolling memory
   bashFileTrackingMaxFiles?: number    // default 20    — refresh code-map for files a bash call touched (0 = off)
   autoReingestGitOnHeadChange?: boolean // default true — re-ingest git when bash moves HEAD (pull/merge/rebase)
@@ -191,6 +228,16 @@ code and comments written in another. It needs the optional
 the model downloads on first use. When off — the default — no model is
 downloaded, the dependency is never loaded, and retrieval is the
 unchanged lexical path. See *Semantic search* in the WIKI.
+
+`enableSessionWorkingSet` (default **on**) makes recall adapt to the
+task in flight: when a file you recalled then gets edited, it joins a
+per-session working set, and subsequent recalls are nudged toward those
+files and their co-change neighbours — so locating one file of a
+multi-file change helps surface the rest. The boost decays over the
+session and clears on a sustained topic shift, falling back to the plain
+lexical+history ranking when the set is empty. It is observable in the
+event stream (`wsBoost`); set it to `false` to pin recall to the
+deterministic baseline.
 
 ### Fine-grained tuning
 

@@ -324,6 +324,38 @@ export function extractRelevantFunction(
   return { sig: best.sig, bodyText, start: best.start, end: best.end }
 }
 
+/**
+ * Extract per-function chunks (signature + a capped slice of the body) from a
+ * file, for the meaning-mode R@1 rerank. Reuses the same regex definition
+ * finder as fused recall, so it is multi-language and needs no tree-sitter at
+ * recall time. Returns at most `maxFns` chunks, each at most `maxLinesPerFn`
+ * lines. Empty on unreadable / unsupported files.
+ */
+export function extractFunctionChunks(
+  absPath: string,
+  opts: { maxFns?: number; maxLinesPerFn?: number } = {}
+): Array<{ sig: string; text: string }> {
+  const maxFns = opts.maxFns ?? 12
+  const maxLines = opts.maxLinesPerFn ?? 25
+  let src: string
+  try {
+    src = readFileSync(absPath, "utf8")
+  } catch {
+    return []
+  }
+  const lines = src.split("\n")
+  const ext = absPath.split(".").pop()?.toLowerCase() ?? ""
+  const pattern = languagePattern(ext)
+  if (pattern === null) return []
+  const defs = findDefinitions(lines, pattern)
+  const out: Array<{ sig: string; text: string }> = []
+  for (const d of defs.slice(0, maxFns)) {
+    const end = Math.min(d.end, d.start + maxLines - 1)
+    out.push({ sig: d.sig, text: lines.slice(d.start - 1, Math.max(end, d.start)).join("\n") })
+  }
+  return out
+}
+
 function tokenizeForMatch(s: string): Set<string> {
   const raw = s.toLowerCase().match(/[a-z0-9]+/g) ?? []
   const out = new Set<string>()

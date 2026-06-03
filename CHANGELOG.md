@@ -7,6 +7,72 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 on the understanding that the public surface for SemVer purposes is the
 tool list (`memory_*`) and the documented `UserConfig` options.
 
+## [0.0.10] — 2026-06-03
+
+First release since 0.0.9. The headline is a removal; the rest is a set of
+retrieval features, most of them conservative and several gated off pending
+live validation.
+
+### Removed
+- **Goal-shift context compaction** (`enableContextCompaction`, plus
+  `contextDriftThreshold` / `contextMinObservationChars`, the `context/`
+  module, and its drift detectors). It was off by default, duplicated
+  OpenCode's native context pruning, and mutated the message history in place
+  — an unsafe combination that earned its removal. ~770 lines gone. (The small
+  term tokeniser it carried now lives with the working-set code, its only
+  remaining user.)
+
+### Added
+- **Match mode on `memory_recall`** — an optional `by` argument. `by: "name"`
+  (default) is pure lexical match (BM25 + git-history), the robust winner in
+  offline ranking evaluation; `by: "meaning"` additionally blends vector
+  similarity, for queries phrased as plain-English descriptions when exact
+  identifiers aren't known. The model declares intent in plain language instead
+  of a learned router deciding for it; the default path is unchanged and the
+  embedding cost is skipped entirely on name-queries.
+- **Session working-set prior** (`enableSessionWorkingSet`, **default on**).
+  Retrieval adapts to the active task: a file whose recall the agent then edited
+  joins a per-session working set, and later recalls are boosted toward those
+  files and their co-change neighbours — so finding one file of a multi-file
+  change surfaces the rest (offline proxy: finding the remaining gold rose from
+  R@5 0.29→0.47). Strength decays each recall; sustained query-topic drift
+  flushes the set. Empty/decayed ⇒ plain BM25+history. Instrumented via
+  `summary.wsBoost`; disable with `enableSessionWorkingSet: false`. NOT recall-
+  safe (it can promote a file across the top-5 boundary, which is the point) and
+  not yet validated over a live multi-turn session — watch the telemetry.
+- **Session provenance** (`enableSessionProvenance`, default on) — captures the
+  recall→edit causal link, so a recall whose file the agent then edits is
+  recorded (and surfaces "this was reached via that query" context later). This
+  link is also the signal the working-set prior and the passive mode-selection
+  logging build on.
+- **R@1 reranker** (`semanticRerank` / `semanticRerankWindow`, **default off**).
+  For `by: "meaning"`, reorders the top window of candidates by per-function
+  code-embedding similarity to sharpen which file lands at #1. Window-limited,
+  so it provably cannot reduce Recall@5 (offline: +32% R@1 on requests at zero
+  R@5 cost). Repo-dependent and not live-validated; enable to evaluate.
+- **Per-function embedding module** (`search/per-function.ts`) — embeds each
+  function and max-pools to the file. Offline this was 2–5× better than the
+  whole-file embedding the semantic path uses today; shipped as a tested
+  mechanism, not yet wired into the live embed pass (diane's live embedder is
+  e5; the win used a code-specialised model).
+- **Passive mode-selection logging** — a `recall.useful` event tagged with the
+  `by` mode fires when a recalled file is edited, so name-vs-meaning usefulness
+  can be measured from real usage with no extra study.
+
+### Testing
+- Added `recall-integration.test.ts`, which drives the real plugin (real git
+  ingestion, real tool-execute edit hooks, real `memory_recall`) to cover the
+  wired recall path the unit tests miss: the working-set co-change **injection**
+  (isolated from base co-change boosting), the `by`-mode gating/fallback, and
+  the rerank's chunk extractor. The model-dependent semantic blend / at-recall
+  rerank embedding remain covered by the pure-function tests.
+
+### Measured and rejected (kept out)
+- Identifier-match boost in the lexical ranker — flat (BM25 already rewards
+  exact identifier matches).
+- Recency-weighted git history — neutral-to-negative; equal-weighted history is
+  already the right signal.
+
 ## [0.0.9] — 2026-05-28
 
 Two additions on top of 0.0.8: **fused recall** (default ON — a measured

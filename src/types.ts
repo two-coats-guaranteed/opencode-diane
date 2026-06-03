@@ -14,6 +14,7 @@ export type Category =
   | "code-map"
   | "session-trace"
   | "session-snapshot"
+  | "function-trace"
   | "agent-note"
   | "skill-mined"
   | "custom"
@@ -261,28 +262,28 @@ export interface UserConfig {
    * turns). See EVAL.md.
    */
   fuseRecallBody?: boolean
+  /** Rerank meaning-mode top results by per-function embedding (R@1). Default false. */
+  semanticRerank?: boolean
+  /** Window size for the meaning-mode rerank. Default 3. */
+  semanticRerankWindow?: number
+  /** Session working-set prior (co-change boost toward the active locus). Default true. */
+  enableSessionWorkingSet?: boolean
   /** Max function-body lines to fuse into a recall response. Default 150. */
   fuseRecallMaxLines?: number
   /**
-   * Goal-shift context compaction. When the conversation's goal shifts
-   * significantly, mask the stale span's tool observations (file reads,
-   * command output) — keeping reasoning intact — and re-insert them if the
-   * goal later drifts back. Default FALSE.
+   * Session provenance: record which function an agent worked on (and the
+   * recall query that led it there), then fuse that history into future
+   * `memory_recall` responses — the agent-session analogue of injecting a
+   * `git blame` commit's message+diff. Default TRUE.
    *
-   * This deliberately accepts a prompt-cache miss at each shift (the
-   * rewritten message prefix), in exchange for a smaller per-turn context
-   * for the rest of the new segment. Detection reuses the e5 embedder when
-   * semantic search is on, else a local lexical-cohesion signal. Originals
-   * are stashed (and independently re-fetchable), so a premature
-   * compaction is recoverable — the defence against "summarization drift".
-   * EXPERIMENTAL; off by default; verify on your own transcripts first.
+   * Recording is precise: a trace is written only when a recall in the
+   * session actually pointed at the file being edited (a real recall→edit
+   * link). Retrieval adds one short line to the recall response when prior
+   * provenance exists for the surfaced function. Additive only — it never
+   * mutates the conversation. Research basis: HAFixAgent / Code Researcher
+   * (2025) show history injection improves repair at no extra turn cost.
    */
-  enableContextCompaction?: boolean
-  /** Cosine similarity at/below which a turn starts a new goal segment.
-   *  Lexical backend default 0.20; embedding backend default 0.55. */
-  contextDriftThreshold?: number
-  /** Minimum tool-output chars worth masking. Default 400. */
-  contextMinObservationChars?: number
+  enableSessionProvenance?: boolean
   /**
    * Expose the full memory_* tool surface to the agent. Default FALSE.
    *
@@ -442,12 +443,19 @@ export interface ResolvedConfig {
   enableAstReadView: boolean
   fuseRecallBody: boolean
   fuseRecallMaxLines: number
-  enableContextCompaction: boolean
-  contextDriftThreshold?: number
-  contextMinObservationChars: number
+  enableSessionProvenance: boolean
   exposeOpsTools: boolean
   adaptive: boolean
   enableSemanticSearch: boolean
+  /** Rerank the top window of meaning-mode results by per-function embedding
+   * similarity to sharpen Recall@1. Window-limited so it cannot reduce
+   * Recall@5. Default false (repo-dependent; not yet live-validated). */
+  semanticRerank: boolean
+  /** Window size for the meaning-mode rerank. Default 3. */
+  semanticRerankWindow: number
+  /** Session working-set prior: boost recalls toward recently-edited files and
+   * their co-change neighbours, decaying over the session. Default true. */
+  enableSessionWorkingSet: boolean
   embeddingModel: string
   personalizedPageRank: boolean
   recordSessionActivity: boolean
