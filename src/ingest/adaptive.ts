@@ -204,9 +204,25 @@ export function applyAdaptiveTuning(
   }
   // codeMapMaxFiles and coChangeMaxCommits are user-exposable since
   // v0.0.4 — respect an explicit override; otherwise follow the tier.
-  if (!config.explicitKeys.has("codeMapMaxFiles") && config.codeMapMaxFiles !== t.codeMapMaxFiles) {
-    config.codeMapMaxFiles = t.codeMapMaxFiles
-    changes.push(`codeMapMaxFiles=${t.codeMapMaxFiles}`)
+  //
+  // Without git history (basis "files"), diane's differentiated value —
+  // history recall, co-change, churn — is absent, and the file-count
+  // tiers would otherwise ESCALATE the upfront code-map parse (medium
+  // 4000 / large 10000) exactly when there is least reason to pay for
+  // it. A large no-git tree would then tree-sitter-parse up to 10k
+  // files at startup — pure CPU, competing with the agent's first
+  // turns — for little marginal value. So clamp the no-git cap to the
+  // small tier: the same conservative budget diane already gives a
+  // young (low-commit) git repo. The per-file live refresh still
+  // re-indexes files the session edits, so anything past the cap that
+  // actually gets touched is filled in on demand.
+  const codeMapCap =
+    signal.basis === "files"
+      ? Math.min(t.codeMapMaxFiles, TIERS.small.codeMapMaxFiles)
+      : t.codeMapMaxFiles
+  if (!config.explicitKeys.has("codeMapMaxFiles") && config.codeMapMaxFiles !== codeMapCap) {
+    config.codeMapMaxFiles = codeMapCap
+    changes.push(`codeMapMaxFiles=${codeMapCap}`)
   }
   if (!config.explicitKeys.has("coChangeMaxCommits")) {
     config.coChangeMaxCommits = t.coChangeMaxCommits

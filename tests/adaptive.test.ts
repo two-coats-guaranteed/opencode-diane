@@ -118,6 +118,31 @@ async function main(): Promise<void> {
   )
   assert(cLarge.codeMapMaxFiles === 10000, "large tier sets codeMapMaxFiles=10000")
 
+  // ── no-git (file basis) clamps code-map to the conservative tier ───
+  // Without history diane has the least value, so the file-count tiers
+  // must NOT escalate the upfront parse. A big no-git tree stays at the
+  // small-tier cap rather than 4000/10000.
+  console.log("\n── adaptive: no-git clamps code-map cap ───────────────────")
+  const cNoGitLarge = baseConfig()
+  applyAdaptiveTuning(cNoGitLarge, { basis: "files", value: 8000, tier: "large" })
+  assert(
+    cNoGitLarge.codeMapMaxFiles === 1500,
+    "no-git large tree clamps codeMapMaxFiles to 1500 (not 10000)"
+  )
+  const cNoGitMed = baseConfig()
+  applyAdaptiveTuning(cNoGitMed, { basis: "files", value: 2000, tier: "medium" })
+  assert(
+    cNoGitMed.codeMapMaxFiles === 1500,
+    "no-git medium tree clamps codeMapMaxFiles to 1500 (not 4000)"
+  )
+  // a WITH-git large repo is unaffected — it still gets the full 10000
+  const cGitLarge = baseConfig()
+  applyAdaptiveTuning(cGitLarge, { basis: "commits", value: 9000, tier: "large" })
+  assert(
+    cGitLarge.codeMapMaxFiles === 10000,
+    "with-git large repo keeps the full code-map cap (clamp is no-git only)"
+  )
+
   // ── explicit user keys are never overridden ────────────────────────
   console.log("\n── adaptive: explicit keys win ───────────────────────────")
   const cExplicit = baseConfig(["gitHistoryDepth", "maxMemoryDiskMB"])

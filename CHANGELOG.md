@@ -13,6 +13,17 @@ First release since 0.0.9. The headline is a removal; the rest is a set of
 retrieval features, most of them conservative and several gated off pending
 live validation.
 
+### Changed
+- **No-git startup cost.** When a repo has no git history, the adaptive
+  sizer no longer escalates the upfront code-map parse by file count
+  (which pushed a large no-git tree to a 4000–10000-file parse — pure
+  startup CPU competing with the agent, for little value since the
+  history signals are absent). It now clamps to the conservative
+  small-tier cap (1500), matching how diane already treats a young
+  git repo. Measured on a 6000-file no-git tree: prefill code-map parse
+  ~4.2s → ~0.9s. Files past the cap that the session edits are still
+  re-indexed on the fly. With-git repos are unaffected.
+
 ### Removed
 - **Goal-shift context compaction** (`enableContextCompaction`, plus
   `contextDriftThreshold` / `contextMinObservationChars`, the `context/`
